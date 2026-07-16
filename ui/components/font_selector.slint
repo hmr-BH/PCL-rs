@@ -1,0 +1,37 @@
+// ==========================================================================
+// PCL-rs 字体选择器 FontSelector — 移植（数据驱动改造）
+// 原版文件：Controls/FontSelector.xaml + FontSelector.xaml.cs
+// 原版结构：MyComboBox（MaxDropDownHeight=300，滚动条 Auto）
+//   项模板：TextBlock 居中、FontFamily=该项字体（即以自身字体渲染名称）
+//   数据：默认项（Lang“默认”，Tag=""）+ 异步枚举 Fonts.SystemFontFamilies
+//         排序后的系统字体列表；SelectedFontTag 双向；加载期间禁用
+// 关键参数：与 MyComboBox 一致（弹层高度上限 300）
+// 已知偏差（任务允许）：
+//   1. 不在 Slint 侧做系统字体实时枚举/异步加载：字体名列表由 Rust 后端
+//      通过 `fonts` 模型提供（首项建议放“默认”）。
+//   2. 语言切换时默认项字体重建（LocalizationFontService）不在前端复刻。
+//   3. SelectedFontTag 简化为 current-index + 字体名字符串。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyComboBox } from "./combo_box.slint";
+
+export component FontSelector {
+    in property <[string]> fonts: [];        // 字体名列表（首项为“默认”）
+    in-out property <int> current-index: 0;
+    in property <bool> enabled: true;
+
+    callback changed(int, string);           // 原版 SelectionChanged(index, 字体名)
+
+    height: 28px;
+
+    combo := MyComboBox {
+        width: 100%; height: 100%;
+        model: root.fonts;
+        current-index <=> root.current-index;
+        enabled: root.enabled;
+        max-drop-down-height: 300px;         // 原版 MaxDropDownHeight=300
+        item-use-own-font: true;             // 项居中 + 以自身字体渲染
+        changed(i, t) => { root.changed(i, t); }
+    }
+}

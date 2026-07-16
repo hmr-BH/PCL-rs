@@ -1,0 +1,101 @@
+import { GlobalTheme } from "../theme/theme.slint";
+
+export component MyCard {
+    in property <string> title: "";
+    in property <bool> can-swap: false;
+    in-out property <bool> is-swapped: false;
+    callback toggled();
+
+    width: 100%;
+    height: root.can-swap && root.is-swapped ? 40px : self.preferred-height;
+    animate height { duration: 200ms; easing: cubic-bezier(0, 0.45, 0.05, 1); }
+
+    changed is-swapped => {
+        root.toggled();
+    }
+    
+    touch := TouchArea {
+        width: 100%; 
+        height: 100%;
+        mouse-cursor: root.can-swap ? pointer : default;
+        clicked => {
+            if (root.can-swap) {
+                root.is-swapped = !root.is-swapped;
+            }
+        }
+    }
+
+    Rectangle {
+        clip: true;
+        width: 100%; 
+        height: 100%;
+        border-width: 2px;        
+        border-radius: 5px;
+        background: touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+        border-color: touch.has-hover ? GlobalTheme.card-border-color-hover : GlobalTheme.card-border-color;
+
+        drop-shadow-blur: touch.has-hover ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: touch.has-hover ? 0px : 2px;
+        drop-shadow-color: touch.has-hover ? #4890f533 : #343d4a0d;
+
+        animate border-color { duration: 90ms; }
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        VerticalLayout {
+            header := Rectangle {
+                height: 44px;
+                width: 100%;
+                background: touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+
+                HorizontalLayout {
+                    width: 100%; 
+                    height: 100%;
+                    padding-left: 18px;
+                    padding-bottom: 4px;
+                    
+                    Text {
+                        text: root.title;
+                        font-size: GlobalTheme.font-size;
+                        font-weight: GlobalTheme.title-font-weight;
+                        font-family: GlobalTheme.font-family;
+                        color: touch.has-hover ? GlobalTheme.primary-text-color : GlobalTheme.secondary-text-color;
+                        vertical-alignment: center;
+                        horizontal-alignment: left;
+                        animate color { duration: 90ms; }
+                    }
+
+                    VerticalLayout {
+                        padding-top: 14px;
+                        padding-right: 12px;
+                        if root.can-swap : Image {
+                            width: 12px; 
+                            height: 12px;
+                            source: @image-url("../assets/chevron.svg");
+                            image-fit: contain;
+                            transform-rotation: root.is-swapped ? 0deg : 180deg;
+                            animate transform-rotation {
+                                duration: 250ms;
+                                easing: cubic-bezier(0, 0.45, 0.05, 1);
+                            }
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                padding-left: 20px;
+                padding-bottom: 24px;
+                
+                Rectangle {
+                    width: 100%;
+                    height: self.preferred-height;
+                    clip: true;
+                    @children
+                }
+            }
+        }
+    }
+}

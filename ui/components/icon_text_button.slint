@@ -1,0 +1,86 @@
+// ==========================================================================
+// PCL-rs 图标文本按钮 —— 1:1 移植自 PCL-CE MyIconTextButton
+//   原版文件：Controls/MyIconTextButton.xaml + Controls/MyIconTextButton.xaml.cs
+//
+// 结构：高 27、圆角 13.5 的 pill（Background = ColorBrushSemiTransparent），
+//   可选 16px 图标（Margin 12,0,0,0）+ 文本（有图标 Margin 7,0,12,1，
+//   无图标 Margin 12,0,12,1），宽度随内容自适应。
+//
+// 关键动画参数（与原版一致，原版无缩放动画）：
+//   悬停：前景 → ColorBrush3、背景 → ColorBrushBg1，100ms（animationTimeOfMouseIn）
+//   按下：背景 → ColorBrush6，70ms
+//   离开/恢复：150ms（animationTimeOfMouseOut）
+//   禁用：前景 → ColorBrushGray5，100ms
+//   常态前景：ColorType.Black → ColorBrush1 / ColorType.Highlight → ColorBrush3
+//
+// 已知偏差：
+//   1. 仅支持 lucide SVG 图标；原版 SVG 图标忽略 LogoScale，此处 logo-scale 生效。
+//   2. 原版 Inlines 富文本未移植，仅纯文本。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export enum IconTextButtonColor { Black, Highlight }
+
+export component MyIconTextButton {
+    in property <string> text: "";
+    in property <image> icon;
+    in property <float> logo-scale: 1.0;
+    in property <IconTextButtonColor> color-type: IconTextButtonColor.Black;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    private property <bool> has-icon: root.icon.width > 0;
+
+    height: 27px;   // 原版 MinHeight = MaxHeight = 27
+    // 有图标：12 + 16 + 7 + 文本 + 12；无图标：12 + 文本 + 12
+    width: (root.has-icon ? 35px : 12px) + txt.preferred-width + 12px;
+
+    property <brush> fg: !root.enabled ? GlobalTheme.gray5
+        : touch.has-hover ? GlobalTheme.color3
+        : (root.color-type == IconTextButtonColor.Highlight ? GlobalTheme.color3 : GlobalTheme.color1);
+    property <brush> bg: !root.enabled ? GlobalTheme.color-semi-transparent
+        : (touch.pressed && touch.has-hover) ? GlobalTheme.color6
+        : touch.has-hover ? GlobalTheme.color-bg1
+        : GlobalTheme.color-semi-transparent;
+    private property <duration> fg-time: !root.enabled || touch.has-hover ? 100ms : 150ms;
+    private property <duration> bg-time: (touch.pressed && touch.has-hover) ? 70ms
+        : touch.has-hover ? 100ms : 150ms;
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    rect := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 13.5px;
+        background: root.bg;
+        animate background { duration: root.bg-time; }
+
+        if root.has-icon : Image {
+            x: 12px;
+            y: (parent.height - self.height) / 2;
+            width: 16px * root.logo-scale;
+            height: 16px * root.logo-scale;
+            source: root.icon;
+            colorize: root.fg;
+            image-fit: contain;
+            animate colorize { duration: root.fg-time; }
+        }
+        txt := Text {
+            x: root.has-icon ? 35px : 12px;
+            y: (parent.height - 1px - self.height) / 2;   // 原版文本 Margin 底 1
+            width: self.preferred-width;
+            height: self.preferred-height;
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            animate color { duration: root.fg-time; }
+        }
+    }
+}

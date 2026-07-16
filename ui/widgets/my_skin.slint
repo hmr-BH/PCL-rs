@@ -1,0 +1,360 @@
+// ==========================================================================
+// PCL-rs 小部件：玩家皮肤头像 MySkin + 全身预览 MySkinViewer — 1:1 移植
+// 原版文件：
+//   Pages/PageLaunch/MySkin.xaml + .xaml.cs（启动页左侧玩家头像）
+//   Pages/PageLaunch/PageLoginProfileSkin.xaml + .xaml.cs（头像 + 名称 + 悬停按钮卡）
+//
+// MySkin 结构（原版 64×64 Grid，Background=ColorBrushSemiTransparent）：
+//   ImgBack 48×48 居中：脸层 = 皮肤 (8,8,8,8) 区域放大，NearestNeighbor；
+//   ImgFore 56×56 居中：头发层 = 皮肤 (40,8,8,8) 区域放大，NearestNeighbor；
+//   阴影：DropShadow BlurRadius 10 Depth 0 Color=ColorObject2(#0b5bcb)，
+//     常态 Opacity 0.2 → 悬停 0.8（200ms，进入 delay 100 / 离开不延迟）；
+//   按下 scale→0.9（60ms OutFluent），松开→1.0（60ms）并触发 Click（更换皮肤）；
+//   右键 ContextMenu：另存为 / 刷新 / 更换披风（HasCape 时才有披风项）。
+//   皮肤缩放 scale = 图片宽/64（64×32 旧版与 64×64 新版均支持，剪辑坐标×scale）。
+//
+// MySkinViewer（按任务规格扩展，组合 PageLoginProfileSkin 的悬停按钮卡 idiom）：
+//   经典 64×64 皮肤版式正面/背面全身预览（头 8×8 @(8,8)、身体、手臂、腿，
+//   经 source-clip-x/y/width/height 逐部件剪辑，pixelated 渲染，1 皮肤像素 = 3px）；
+//   披风预览取披风图 (1,0,11,17) 区域（原版 MySkin.xaml.cs capeFrontRegion）；
+//   下方玩家名 16px 居中 + 档案类型 12px Gray4 居中；
+//   悬停显示按钮卡（opacity 0→1 120ms，圆角 5 MyCard 镀铬，Margin 10,3,9,3）：
+//     更换皮肤(shirt) / 另存为(save) / 刷新(refresh-cw) / 更换披风(仅 HasCape)。
+//
+// 已知偏差：
+//   1. 原版右键菜单项图标为 WPF path（软盘/刷新/披风手绘），此处用 lucide
+//      等价物 save/refresh-cw/shirt 替代；菜单项 Padding 0,2 取菜单默认 26px 行高。
+//   2. 原版 ToolTip（"点击更换皮肤（右键查看更多选项）"/"加载中..."）未实现（Slint 无 ToolTip）。
+//   3. 原版按透明度像素检测头发层有无，此处由 Rust 侧判定后经 has-hat 传入。
+//   4. MySkinViewer 全身预览为任务规格要求的扩展组件（原版仅头像），
+//      旧版 64×32 皮肤的左臂/左腿镜像复用未实现（仅支持 64×64 版式）。
+//   5. 按钮 ToolTip（更换皮肤/刷新皮肤等）未实现；更换披风按钮图标用 lucide/layers
+//      替代原版手绘披风 path。
+//   6. 头像缓存合成（completeHead 56×56 存盘）属后端职责，未在此实现。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+import { MyMenu, MyMenuItemData } from "../components/menu.slint";
+
+// ==========================================================================
+// MySkin — 玩家皮肤头像（64×64）
+// ==========================================================================
+export component MySkin inherits Rectangle {
+    in property <image> skin-image;        // 皮肤原图（64×32 或 64×64）
+    in property <bool> has-hat: true;      // 是否有头发层（原版按透明度检测，见偏差 3）
+    in property <bool> has-cape: false;    // 右键菜单是否显示"更换披风"
+    in property <bool> enabled: true;
+
+    callback change-skin();    // 左键点击（原版 Click 事件 → 更换皮肤）
+    callback save-as();        // 另存为（原版 BtnSkinSave_Click）
+    callback refresh();        // 刷新（原版 BtnSkinRefresh_Click → RefreshCache）
+    callback change-cape();    // 更换披风（原版 BtnSkinCape_Click）
+
+    // 皮肤缩放（原版 scale = image.Width / 64）
+    property <int> s: Math.max(1, Math.round(root.skin-image.width / 64));
+
+    // 右键菜单项（原版 ContextMenu；图标为 lucide 等价物，见偏差 1）
+    property <[MyMenuItemData]> menu-items: root.has-cape ? [
+        { text: "另存为", icon: @image-url("../assets/icons/lucide/save.svg"), has-icon: true, enabled: true },
+        { text: "刷新", icon: @image-url("../assets/icons/lucide/refresh-cw.svg"), has-icon: true, enabled: true },
+        { text: "更换披风", icon: @image-url("../assets/icons/lucide/shirt.svg"), has-icon: true, enabled: true },
+    ] : [
+        { text: "另存为", icon: @image-url("../assets/icons/lucide/save.svg"), has-icon: true, enabled: true },
+        { text: "刷新", icon: @image-url("../assets/icons/lucide/refresh-cw.svg"), has-icon: true, enabled: true },
+    ];
+
+    width: 64px;
+    height: 64px;
+    background: GlobalTheme.color-semi-transparent;
+
+    // 阴影（BlurRadius 10 Depth 0 ColorObject2；0.2 → 悬停 0.8）
+    drop-shadow-blur: 10px;
+    drop-shadow-offset-x: 0px;
+    drop-shadow-offset-y: 0px;
+    drop-shadow-color: GlobalTheme.color2.with-alpha(touch.has-hover ? 0.8 : 0.2);
+    animate drop-shadow-color { duration: 200ms; delay: touch.has-hover ? 100ms : 0ms; }
+
+    // 按下缩放（0.9 / 1.0，60ms OutFluent ≈ ease-out）
+    transform-scale: touch.pressed ? 0.9 : 1.0;
+    animate transform-scale { duration: 60ms; easing: ease-out; }
+
+    // ---- 脸层 ImgBack（48×48 居中 → (8,8)；皮肤 (8,8,8,8)×scale）----
+    Image {
+        x: 8px;
+        y: 8px;
+        width: 48px;
+        height: 48px;
+        source: root.skin-image;
+        source-clip-x: 8 * root.s;
+        source-clip-y: 8 * root.s;
+        source-clip-width: 8 * root.s;
+        source-clip-height: 8 * root.s;
+        image-fit: fill;
+        image-rendering: pixelated;      // 原版 NearestNeighbor
+    }
+
+    // ---- 头发层 ImgFore（56×56 居中 → (4,4)；皮肤 (40,8,8,8)×scale）----
+    if root.has-hat : Image {
+        x: 4px;
+        y: 4px;
+        width: 56px;
+        height: 56px;
+        source: root.skin-image;
+        source-clip-x: 40 * root.s;
+        source-clip-y: 8 * root.s;
+        source-clip-width: 8 * root.s;
+        source-clip-height: 8 * root.s;
+        image-fit: fill;
+        image-rendering: pixelated;
+    }
+
+    // 右键菜单（原版 Grid.ContextMenu）
+    menu := MyMenu {
+        items: root.menu-items;
+        triggered(i) => {
+            if i == 0 { root.save-as(); }
+            else if i == 1 { root.refresh(); }
+            else if i == 2 { root.change-cape(); }
+        }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.change-skin(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                menu.open(self.mouse-x, self.mouse-y);
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// 私有：SkinPart — 皮肤部件（按源区域剪辑并以 3px/皮肤像素 显示）
+// ==========================================================================
+component SkinPart inherits Image {
+    in property <image> tex;
+    in property <int> src-x;      // 源区域左上角（64 基皮肤像素）
+    in property <int> src-y;
+    in property <int> unit-x;     // 目标位置（皮肤像素单位）
+    in property <int> unit-y;
+    in property <int> unit-w;     // 源/目标尺寸（皮肤像素单位）
+    in property <int> unit-h;
+    in property <int> tex-scale: 1;    // 皮肤缩放（图片宽/64）
+    in property <length> unit: 3px;    // 显示缩放（1 皮肤像素 = 3px）
+
+    x: unit-x * unit;
+    y: unit-y * unit;
+    width: unit-w * unit;
+    height: unit-h * unit;
+    source: tex;
+    source-clip-x: src-x * tex-scale;
+    source-clip-y: src-y * tex-scale;
+    source-clip-width: unit-w * tex-scale;
+    source-clip-height: unit-h * tex-scale;
+    image-fit: fill;
+    image-rendering: pixelated;
+}
+
+// ==========================================================================
+// MySkinViewer — 全身正面/背面 + 披风预览 + 玩家名 + 悬停操作按钮卡
+// ==========================================================================
+export component MySkinViewer inherits Rectangle {
+    in property <image> skin-image;
+    in property <image> cape-image;
+    in property <bool> has-cape: false;
+    in property <bool> show-layers: true;   // 渲染外层（帽子/外套/袖子/裤管外层）
+    in property <string> player-name: "";
+    in property <string> player-type: "";   // 档案类型（PageLoginProfileSkin TextType）
+
+    callback change-skin();
+    callback save-as();
+    callback refresh();
+    callback change-cape();
+
+    property <int> s: Math.max(1, Math.round(root.skin-image.width / 64));
+    property <length> unit: 3px;
+
+    width: lay.preferred-width;
+    height: lay.preferred-height;
+    background: #00000000;
+
+    // 悬停感知（置于底层，原版 PanData.MouseEnter/Leave）
+    hover-touch := TouchArea {
+        width: 100%;
+        height: 100%;
+    }
+
+    lay := VerticalLayout {
+        width: 100%;
+        alignment: start;
+        spacing: 4px;
+
+        // ---- 预览行（正面 16×32、背面 16×32、披风 11×17，单位 3px）----
+        HorizontalLayout {
+            alignment: center;
+            spacing: 12px;
+            padding-top: 4px;
+
+            // 正面（视左 = 玩家右侧）
+            Rectangle {
+                width: 16 * root.unit;
+                height: 32 * root.unit;
+                drop-shadow-blur: 10px;
+                drop-shadow-color: GlobalTheme.color2.with-alpha(0.2);
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 8; src-y: 8; unit-x: 4; unit-y: 0; unit-w: 8; unit-h: 8; }       // 头
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 40; src-y: 8; unit-x: 4; unit-y: 0; unit-w: 8; unit-h: 8; }      // 帽子
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 20; src-y: 20; unit-x: 4; unit-y: 8; unit-w: 8; unit-h: 12; }    // 身体
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 20; src-y: 36; unit-x: 4; unit-y: 8; unit-w: 8; unit-h: 12; }    // 外套
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 44; src-y: 20; unit-x: 0; unit-y: 8; unit-w: 4; unit-h: 12; }    // 右臂（视左）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 44; src-y: 36; unit-x: 0; unit-y: 8; unit-w: 4; unit-h: 12; }    // 右臂外层
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 36; src-y: 52; unit-x: 12; unit-y: 8; unit-w: 4; unit-h: 12; }   // 左臂（视右）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 52; src-y: 52; unit-x: 12; unit-y: 8; unit-w: 4; unit-h: 12; }   // 左臂外层
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 4; src-y: 20; unit-x: 4; unit-y: 20; unit-w: 4; unit-h: 12; }    // 右腿（视左）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 4; src-y: 36; unit-x: 4; unit-y: 20; unit-w: 4; unit-h: 12; }    // 右腿外层
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 20; src-y: 52; unit-x: 8; unit-y: 20; unit-w: 4; unit-h: 12; }   // 左腿（视右）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 4; src-y: 52; unit-x: 8; unit-y: 20; unit-w: 4; unit-h: 12; }    // 左腿外层
+            }
+
+            // 背面（视左 = 玩家右侧）
+            Rectangle {
+                width: 16 * root.unit;
+                height: 32 * root.unit;
+                drop-shadow-blur: 10px;
+                drop-shadow-color: GlobalTheme.color2.with-alpha(0.2);
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 24; src-y: 8; unit-x: 4; unit-y: 0; unit-w: 8; unit-h: 8; }      // 头后
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 56; src-y: 8; unit-x: 4; unit-y: 0; unit-w: 8; unit-h: 8; }      // 帽子后
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 32; src-y: 20; unit-x: 4; unit-y: 8; unit-w: 8; unit-h: 12; }    // 身体后
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 32; src-y: 36; unit-x: 4; unit-y: 8; unit-w: 8; unit-h: 12; }    // 外套后
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 52; src-y: 20; unit-x: 0; unit-y: 8; unit-w: 4; unit-h: 12; }    // 右臂后（视左）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 52; src-y: 36; unit-x: 0; unit-y: 8; unit-w: 4; unit-h: 12; }    // 右臂外层后
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 44; src-y: 52; unit-x: 12; unit-y: 8; unit-w: 4; unit-h: 12; }   // 左臂后（视右）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 60; src-y: 52; unit-x: 12; unit-y: 8; unit-w: 4; unit-h: 12; }   // 左臂外层后
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 12; src-y: 20; unit-x: 4; unit-y: 20; unit-w: 4; unit-h: 12; }   // 右腿后（视左）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 12; src-y: 36; unit-x: 4; unit-y: 20; unit-w: 4; unit-h: 12; }   // 右腿外层后
+                SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 28; src-y: 52; unit-x: 8; unit-y: 20; unit-w: 4; unit-h: 12; }   // 左腿后（视右）
+                if root.show-layers : SkinPart { tex: root.skin-image; tex-scale: root.s; unit: root.unit;
+                    src-x: 12; src-y: 52; unit-x: 8; unit-y: 20; unit-w: 4; unit-h: 12; }   // 左腿外层后
+            }
+
+            // 披风正面（原版 capeFrontRegion = (1,0,11,17)，原始像素不乘皮肤缩放）
+            if root.has-cape : Image {
+                width: 11 * root.unit;
+                height: 17 * root.unit;
+                y: 8 * root.unit;      // 与身体顶部对齐（观感）
+                source: root.cape-image;
+                source-clip-x: 1;
+                source-clip-y: 0;
+                source-clip-width: 11;
+                source-clip-height: 17;
+                image-fit: fill;
+                image-rendering: pixelated;
+            }
+        }
+
+        // ---- 玩家名（16px 居中，Margin 8,0）----
+        if root.player-name != "" : Text {
+            text: root.player-name;
+            font-size: 16px;
+            font-family: GlobalTheme.font-family;
+            color: GlobalTheme.color1;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        // ---- 档案类型（12px Gray4 居中，Margin 8,4,8,5）----
+        if root.player-type != "" : Text {
+            text: root.player-type;
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: GlobalTheme.gray4;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+
+        // ---- 悬停按钮卡（PageLoginProfileSkin PanButtons：MyCard 圆角 5，
+        //      StackPanel Margin 10,3,9,3，opacity 0→1 120ms）----
+        Rectangle {
+            height: 34px;
+            btn-card := Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: 1px;
+                width: btn-lay.preferred-width + 2px;
+                height: 31px;
+                border-width: 2px;
+                border-radius: 5px;
+                background: GlobalTheme.card-background;
+                border-color: GlobalTheme.card-border-color;
+                drop-shadow-blur: 6px;
+                drop-shadow-offset-y: 2px;
+                drop-shadow-color: #343d4a0d;
+                opacity: hover-touch.has-hover ? 1 : 0;
+                animate opacity { duration: 120ms; }
+
+                btn-lay := HorizontalLayout {
+                    x: 1px;
+                    y: 1px;
+                    height: 100%;
+                    padding-left: 10px;
+                    padding-right: 9px;
+                    padding-top: 3px;
+                    padding-bottom: 3px;
+                    spacing: 9px;
+
+                    MyIconButton {   // 更换皮肤（原版 BtnSkin，lucide/shirt，LogoScale 1.08）
+                        self-width: 24px;
+                        self-height: 24px;
+                        logo-scale: 1.08;
+                        icon: @image-url("../assets/icons/lucide/shirt.svg");
+                        clicked => { root.change-skin(); }
+                    }
+                    MyIconButton {   // 另存为
+                        self-width: 24px;
+                        self-height: 24px;
+                        icon: @image-url("../assets/icons/lucide/save.svg");
+                        clicked => { root.save-as(); }
+                    }
+                    MyIconButton {   // 刷新
+                        self-width: 24px;
+                        self-height: 24px;
+                        icon: @image-url("../assets/icons/lucide/refresh-cw.svg");
+                        clicked => { root.refresh(); }
+                    }
+                    if root.has-cape : MyIconButton {   // 更换披风（图标见偏差 5）
+                        self-width: 24px;
+                        self-height: 24px;
+                        icon: @image-url("../assets/icons/lucide/layers.svg");
+                        clicked => { root.change-cape(); }
+                    }
+                }
+            }
+        }
+    }
+}

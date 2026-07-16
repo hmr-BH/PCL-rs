@@ -1,0 +1,445 @@
+// PCL-rs 右下角弹出提示 — 1:1 移植 PCL-CE MyToast（Controls/MyToast.xaml + .xaml.cs）
+//                              + HintService 的堆叠/调度逻辑（Modules/UI/HintService.cs）
+//
+// 单条 Toast 外观（原版 MyToast.xaml）：
+//   圆角 8，背景 ColorBrushBackground(#deecff)，文字 ColorBrushGray1(#404040)；
+//   阴影 DropShadow Blur 16 / Opacity 0.2 / Depth 4 / Direction 270；
+//   内容 Margin 10,8,10,6：20×20 图标（右边距 6）+ 加粗 13px 标题（省略号裁剪）+ 20×20 关闭按钮（左边距 8）；
+//   底部 3px 进度条（accent 色，随剩余时间线性缩短）；最小高度 45px。
+// accent 色（原版 UpdateColors 的 FromHSL2(hue, 75, 60) 离线计算）：
+//   Success hue=145 #1dc864   Error hue=355 #e8606b
+//   Warning hue=40  #dd9e20   Info  hue=210 #3189e2
+// 图标（HintService）：Success=lucide/circle-check  Error=lucide/circle-minus
+//   Warning=lucide/triangle-alert  Info=lucide/info
+//
+// 动画（原版 Show/StartHideAnimation/Dismiss）：
+//   进入：TranslateX 60→0 400ms OutFluent + 高度 0→target 150ms OutFluent + opacity 0→1 100ms；
+//   退出：TranslateX→+60 200ms InFluent + opacity→0 150ms + 高度→0（收缩）；
+//   显示时长 (800 + clamp(字数,5,23)*180)ms；
+//   右滑关闭：死区 4px，仅允许向右，阈值 max(24px, 宽度*0.12)，拖动时 opacity 下限 0.35，
+//   未过阈值回弹 150ms OutFluent。
+//
+// ToastHost：右下角竖直堆叠（最多 5 条，新条目靠下），右边距 16、下边距 20、条目间距 4；
+//   对外 API：push(ttype, title, text)。
+//
+// 已知偏差：
+//   - 原版 Toast 仅单行加粗标题；本组件额外支持可选副文本 text（12px、gray2），
+//     传空字符串即与原版完全一致。
+//   - 重复提示的 Emphasize 抖动动画未实现：重复（同类型同标题）的 push 直接忽略。
+//   - 拖动期间进度条/自动退出计时不暂停（Slint 动画无法中途暂停），
+//     按压期间计时重置、松手后按完整时长重新计时（原版按剩余时间继续）。
+//   - 进入/退出透明度统一为 120ms（原版 100ms/150ms）；退出高度收缩 150ms 与位移动画并行
+//     （原版为 100ms 且在位移结束后）。
+//   - 槽位固定 5 个位置，复用中间槽位时新 Toast 可能不出现在最底部（原版恒在底部）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// Toast 类型（对应原版 HintType）
+export enum ToastType {
+    Success,
+    Error,
+    Warning,
+    Info,
+}
+
+// 单个 Toast 数据槽（ToastHost 内部使用）
+export struct ToastSlot {
+    active: bool,        // 是否占用
+    kill: bool,          // 宿主请求强制关闭（堆叠满时顶掉最旧条目）
+    ttype: ToastType,
+    title: string,
+    text: string,
+    dur: duration,       // 显示时长
+}
+
+// ==========================================================================
+// MyToast — 单条弹出提示
+// ==========================================================================
+export component MyToast inherits Rectangle {
+    in property <ToastType> toast-type: ToastType.Info;
+    in property <string> title: "";
+    in property <string> text: "";                 // 可选副文本（原版无，见头部偏差说明）
+    in property <duration> duration: 5s;
+    in property <bool> active: false;              // 由宿主置 true 触发进入动画
+    in property <bool> force-exit: false;          // 宿主强制关闭（对应 kill）
+    in property <length> max-toast-width: 380px;    // 原版 MaxWidth = 主窗宽*0.9，此处由宿主给定
+
+    callback finished();     // 退出动画播完，请求宿主回收槽位
+
+    // ---- accent 配色（FromHSL2(hue,75,60) 离线计算）----
+    property <brush> accent:
+        root.toast-type == ToastType.Success ? #1dc864 :
+        root.toast-type == ToastType.Error   ? #e8606b :
+        root.toast-type == ToastType.Warning ? #dd9e20 : #3189e2;
+    property <image> type-icon:
+        root.toast-type == ToastType.Success ? @image-url("../assets/icons/lucide/circle-check.svg") :
+        root.toast-type == ToastType.Error   ? @image-url("../assets/icons/lucide/circle-minus.svg") :
+        root.toast-type == ToastType.Warning ? @image-url("../assets/icons/lucide/triangle-alert.svg")
+                                             : @image-url("../assets/icons/lucide/info.svg");
+
+    // ---- 状态机：idle → shown → exiting → finished ----
+    property <bool> _shown: false;
+    property <bool> _exiting: false;
+    property <float> _prog: 1.0;                   // 进度条剩余比例 1→0
+    property <length> _target-height: max(45px, content-lay.preferred-height);
+
+    changed active => {
+        if root.active && !root._shown && !root._exiting {
+            // 进入：下一帧触发，保证初始值先落地再启动动画
+            enter-timer.running = true;
+        }
+    }
+    changed force-exit => {
+        if root.force-exit { root.dismiss(); }
+    }
+
+    enter-timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            root._shown = true;
+            root._prog = 0.0;      // 进度条随显示时长线性走完
+            self.running = false;
+        }
+    }
+
+    // 自动退出计时（原版拖动时暂停，此处按压期间重置，见偏差说明）
+    life-timer := Timer {
+        interval: root.duration;
+        running: root._shown && !root._exiting && !drag-touch.pressed;
+        triggered => { root.dismiss(); }
+    }
+
+    // 退出收尾：tx 200ms / opacity 150ms / 高度收缩 150ms，取 260ms 保险
+    exit-timer := Timer {
+        interval: 260ms;
+        running: root._exiting;
+        triggered => { root.finished(); }
+    }
+
+    // 请求关闭（对应原版 Dismiss，幂等）
+    public function dismiss() {
+        if root._shown && !root._exiting {
+            root._exiting = true;
+        }
+    }
+
+    // ---- 拖动关闭状态（原版常量：死区 4px / 阈值 max(24px, 12%宽) / 透明度下限 0.35）----
+    property <length> _drag-x: 0px;
+
+    width: min(root.max-toast-width, content-lay.preferred-width);
+    // 高度：进入 0→target+4（含 4px 条目间距）150ms；退出 →0 150ms
+    height: !root.active ? 0px :
+            root._exiting ? 0px :
+            root._shown ? root._target-height + 4px : 0px;
+    animate height { duration: 150ms; easing: ease-out; }
+    clip: true;
+
+    // 进入位移层：TranslateX 60→0 400ms OutFluent
+    enter-x := Rectangle {
+        x: root._shown && !root._exiting ? 0px : 60px;
+        y: 0;
+        width: 100%;
+        height: root._target-height;
+        animate x { duration: 400ms; easing: ease-out; }
+
+        // 退出位移层：TranslateX →+60 200ms InFluent
+        exit-x := Rectangle {
+            x: root._exiting ? 60px : 0px;
+            width: 100%;
+            height: 100%;
+            animate x { duration: 200ms; easing: ease-in; }
+
+            // 拖动层：x 跟随手指（仅向右），松手回弹 150ms OutFluent
+            drag-wrap := Rectangle {
+                x: root._drag-x;
+                width: 100%;
+                height: 100%;
+                animate x { duration: 150ms; easing: ease-out; }
+                // 拖动透明度：max(0.35, 1 - x/宽*(1-0.35))
+                opacity: max(0.35, 1 - root._drag-x / max(1px, self.width) * 0.65);
+
+                // 整体透明度层：进入 0→1 / 退出 →0（统一 120ms，见偏差说明）
+                base := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    opacity: root._shown && !root._exiting ? 1 : 0;
+                    animate opacity { duration: 120ms; }
+
+                    // 阴影 + 圆角底（Blur 16 / Opacity 0.2 / Depth 4 向下）
+                    card := Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        border-radius: 8px;
+                        background: GlobalTheme.background;
+                        drop-shadow-blur: 16px;
+                        drop-shadow-offset-y: 4px;
+                        drop-shadow-color: #00000033;
+                        clip: true;
+
+                        content-lay := VerticalLayout {
+                            // 内容区 Margin 10,8,10,6
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                padding-top: 8px;
+                                padding-bottom: 6px;
+                                spacing: 6px;
+
+                                Image {
+                                    width: 20px;
+                                    height: 20px;
+                                    source: root.type-icon;
+                                    colorize: root.accent;
+                                    image-fit: contain;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                }
+
+                                VerticalLayout {
+                                    alignment: center;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: root.title;
+                                        font-size: GlobalTheme.font-size;
+                                        font-weight: 700;
+                                        font-family: GlobalTheme.font-family;
+                                        color: GlobalTheme.gray1;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.text != "" : Text {
+                                        text: root.text;
+                                        font-size: 12px;
+                                        font-family: GlobalTheme.font-family;
+                                        color: GlobalTheme.gray2;
+                                        overflow: elide;
+                                    }
+                                }
+
+                                // 关闭按钮 20×20，左边距 8
+                                Rectangle {
+                                    width: 28px;  // 20 + 8 左边距
+                                    horizontal-stretch: 0;
+                                    Rectangle {
+                                        x: 8px;
+                                        width: 20px;
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: close-touch.has-hover ? GlobalTheme.gray1.with-alpha(0.12) : #00000000;
+                                        animate background { duration: 120ms; }
+                                        Image {
+                                            x: 4px; y: 4px;
+                                            width: 12px;
+                                            height: 12px;
+                                            source: @image-url("../assets/icons/lucide/x.svg");
+                                            colorize: GlobalTheme.gray1;
+                                            image-fit: contain;
+                                        }
+                                        close-touch := TouchArea {
+                                            width: 100%;
+                                            height: 100%;
+                                            mouse-cursor: pointer;
+                                            clicked => { root.dismiss(); }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 底部 3px 进度条（accent，线性缩短）
+                            Rectangle {
+                                height: 3px;
+                                Rectangle {
+                                    x: 0; y: 0;
+                                    height: 100%;
+                                    width: parent.width * root._prog;
+                                    background: root.accent;
+                                    animate width { duration: root.duration; easing: linear; }
+                                }
+                            }
+                        }
+
+                        // 拖动触摸层（预览级，覆盖除关闭按钮外的区域）
+                        drag-touch := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            enabled: root._shown && !root._exiting;
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down {
+                                    root._drag-x = 0px;
+                                } else if e.kind == PointerEventKind.up {
+                                    // 阈值：max(24px, 宽度*0.12)
+                                    if root._drag-x >= max(24px, self.width * 0.12) {
+                                        root.dismiss();
+                                    }
+                                    root._drag-x = 0px;   // 未关闭则随 animate 回弹 150ms
+                                }
+                            }
+                            moved => {
+                                // 死区 4px，仅允许向右（ApplyDragResistance = max(0, delta)）
+                                if self.pressed {
+                                    root._drag-x = max(0px, self.mouse-x - self.pressed-x - 4px);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// ToastHost — 右下角堆叠管理（对应 HintService.Tick，最多 5 条）
+// 用法：占满父容器后调用 push(ttype, title, text)。
+// ==========================================================================
+export component ToastHost inherits Rectangle {
+    in property <length> max-toast-width: 380px;
+
+    // 5 个固定槽位（原版 PanHint.Children 上限 5）
+    in-out property <ToastSlot> slot0: { active: false };
+    in-out property <ToastSlot> slot1: { active: false };
+    in-out property <ToastSlot> slot2: { active: false };
+    in-out property <ToastSlot> slot3: { active: false };
+    in-out property <ToastSlot> slot4: { active: false };
+
+    // 弹出一条 Toast。时长 = (800 + clamp(标题字数,5,23)*180)ms
+    public function push(ttype: ToastType, title: string, text: string) {
+        // 重复提示（同类型同标题）直接忽略（原版为 Emphasize，见偏差说明）
+        if (root.slot0.active && !root.slot0.kill && root.slot0.title == title && root.slot0.ttype == ttype) ||
+           (root.slot1.active && !root.slot1.kill && root.slot1.title == title && root.slot1.ttype == ttype) ||
+           (root.slot2.active && !root.slot2.kill && root.slot2.title == title && root.slot2.ttype == ttype) ||
+           (root.slot3.active && !root.slot3.kill && root.slot3.title == title && root.slot3.ttype == ttype) ||
+           (root.slot4.active && !root.slot4.kill && root.slot4.title == title && root.slot4.ttype == ttype) {
+            return;
+        }
+        root._pending = {
+            active: true,
+            ttype: ttype,
+            title: title,
+            text: text,
+            dur: 800ms + 180ms * min(23, max(5, title.character-count)),
+        };
+        root.commit-slot();
+    }
+
+    property <ToastSlot> _pending: { active: false };
+
+    // 写入第一个空槽；满员时顶掉最旧活动槽（对应 HintService activeCount>=5 → oldest.Dismiss()）
+    function commit-slot() {
+        if !root.slot0.active {
+            root.slot0 = root._pending;
+        } else if !root.slot1.active {
+            root.slot1 = root._pending;
+        } else if !root.slot2.active {
+            root.slot2 = root._pending;
+        } else if !root.slot3.active {
+            root.slot3 = root._pending;
+        } else if !root.slot4.active {
+            root.slot4 = root._pending;
+        } else {
+            // 已满：关闭最旧的未关闭槽，等其 finished 释放后再写入
+            if !root.slot0.kill { root.slot0.kill = true; }
+            else if !root.slot1.kill { root.slot1.kill = true; }
+            else if !root.slot2.kill { root.slot2.kill = true; }
+            else if !root.slot3.kill { root.slot3.kill = true; }
+            else { root.slot4.kill = true; }
+            requeue-timer.running = true;
+        }
+    }
+
+    requeue-timer := Timer {
+        interval: 300ms;   // 等待被顶掉条目的退出动画播完（finished 会先释放槽位）
+        running: false;
+        triggered => {
+            self.running = false;
+            root.commit-slot();
+        }
+    }
+
+    width: 100%;
+    height: 100%;
+
+    // 堆叠容器：右对齐、底对齐（右边距 16、下边距 20）
+    stack := VerticalLayout {
+        x: parent.width - self.preferred-width - 16px;
+        y: parent.height - self.preferred-height - 20px;
+        spacing: 0;   // 间距已含在条目高度内（+4px），空槽高度 0 不留缝
+
+        // 右对齐包装（条目宽度随内容，靠右贴边）
+        Rectangle {
+            height: toast0.height;
+            toast0 := MyToast {
+                x: parent.width - self.width;
+                toast-type: root.slot0.ttype;
+                title: root.slot0.title;
+                text: root.slot0.text;
+                duration: root.slot0.dur;
+                active: root.slot0.active;
+                force-exit: root.slot0.kill;
+                max-toast-width: root.max-toast-width;
+                finished => { root.slot0 = { active: false }; }
+            }
+        }
+        // 右对齐包装（条目宽度随内容，靠右贴边）
+        Rectangle {
+            height: toast1.height;
+            toast1 := MyToast {
+                x: parent.width - self.width;
+                toast-type: root.slot1.ttype;
+                title: root.slot1.title;
+                text: root.slot1.text;
+                duration: root.slot1.dur;
+                active: root.slot1.active;
+                force-exit: root.slot1.kill;
+                max-toast-width: root.max-toast-width;
+                finished => { root.slot1 = { active: false }; }
+            }
+        }
+        // 右对齐包装（条目宽度随内容，靠右贴边）
+        Rectangle {
+            height: toast2.height;
+            toast2 := MyToast {
+                x: parent.width - self.width;
+                toast-type: root.slot2.ttype;
+                title: root.slot2.title;
+                text: root.slot2.text;
+                duration: root.slot2.dur;
+                active: root.slot2.active;
+                force-exit: root.slot2.kill;
+                max-toast-width: root.max-toast-width;
+                finished => { root.slot2 = { active: false }; }
+            }
+        }
+        // 右对齐包装（条目宽度随内容，靠右贴边）
+        Rectangle {
+            height: toast3.height;
+            toast3 := MyToast {
+                x: parent.width - self.width;
+                toast-type: root.slot3.ttype;
+                title: root.slot3.title;
+                text: root.slot3.text;
+                duration: root.slot3.dur;
+                active: root.slot3.active;
+                force-exit: root.slot3.kill;
+                max-toast-width: root.max-toast-width;
+                finished => { root.slot3 = { active: false }; }
+            }
+        }
+        // 右对齐包装（条目宽度随内容，靠右贴边）
+        Rectangle {
+            height: toast4.height;
+            toast4 := MyToast {
+                x: parent.width - self.width;
+                toast-type: root.slot4.ttype;
+                title: root.slot4.title;
+                text: root.slot4.text;
+                duration: root.slot4.dur;
+                active: root.slot4.active;
+                force-exit: root.slot4.kill;
+                max-toast-width: root.max-toast-width;
+                finished => { root.slot4 = { active: false }; }
+            }
+        }
+    }
+}

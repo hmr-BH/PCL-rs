@@ -1,0 +1,147 @@
+// PCL-rs 提示条组件 — 1:1 移植 PCL-CE MyHint（Controls/MyHint.xaml + .xaml.cs）
+//
+// 结构：左侧 3px 竖条 + 可选 1px 细边框（HasBorder），圆角 2px；
+//       文本 Padding 12,9，自动换行；可选 20×20 关闭按钮（lucide/x，右边距 8）。
+// 配色：按原版 UpdateUI() 的 FromHSL2(hue, 90, L) 离线计算（Light 默认 Tone L2=0.50 / L7=0.94）：
+//       Blue  hue=210  bg #dcedfd  fg/border #0b6ed0
+//       Red   hue=355  bg #fee6e8  fg/border #f42b3c
+//       Yellow hue=40  bg #fdf1d8  fg/border #c1840a
+// 退出动画（ModAnimation.AniDispose）：
+//       scale 1→0.92 200ms EaseInFluent + opacity→0 200ms EaseOutFluent
+//       + 高度→0 150ms（delay 100ms，EaseOutFluent），结束后置不可见并触发 closed()。
+// 已知偏差：
+//   - 原版 TextBlock LineHeight=16 + Margin 0,0,0,-1 的细微行高修正未还原（视觉差 <1px）。
+//   - RelativeSetup（记住"不再提示"的配置持久化）属后端职责，未在此实现；
+//     关闭后通过 closed() 回调通知宿主处理。
+//   - 关闭按钮为简化版 MyIconButton（圆形悬停底），未还原 ToolTip。
+//   - IsWarn 旧属性未移植（原版已标记 Obsolete）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 提示条色调
+export enum HintTone {
+    Blue,
+    Red,
+    Yellow,
+}
+
+export component MyHint {
+    in property <HintTone> tone: HintTone.Red;      // 原版默认 Theme = Red
+    in property <string> text: "";
+    in property <bool> has-border: false;           // 原版 XAML 默认 BorderThickness=3,0,0,0
+    in property <bool> can-close: false;
+    in property <bool> enabled: true;
+
+    callback clicked();     // 按下并抬起（对应原版 MyHint_MouseUp 抛出的自定义事件）
+    callback closed();      // AniDispose 动画播放完毕（此时已高度 0 + 不可见）
+
+    // 请求以 AniDispose 动画关闭（幂等，对应原版 BtnClose_Click / AniDispose 的 IsHitTestVisible 守卫）
+    public function close() {
+        if !root._closing && !root._gone {
+            root._closing = true;
+        }
+    }
+
+    // ---- 色调配色（FromHSL2 离线计算结果，见文件头注释）----
+    property <brush> tone-bg:
+        root.tone == HintTone.Blue ? #dcedfd :
+        root.tone == HintTone.Yellow ? #fdf1d8 : #fee6e8;
+    property <brush> tone-fg:
+        root.tone == HintTone.Blue ? #0b6ed0 :
+        root.tone == HintTone.Yellow ? #c1840a : #f42b3c;
+
+    // ---- AniDispose 状态机 ----
+    property <bool> _closing: false;
+    property <bool> _gone: false;
+    property <length> _target-height: max(txt.preferred-height + 18px,
+                                          root.can-close ? 38px : 0px);
+
+    // 动画总时长：opacity/scale 200ms；高度 delay100+150=250ms；取 260ms 保险
+    dispose-timer := Timer {
+        interval: 260ms;
+        running: root._closing && !root._gone;
+        triggered => {
+            root._gone = true;
+            root.closed();
+        }
+    }
+
+    width: 100%;
+    height: root._closing ? 0px : root._target-height;
+    visible: !root._gone;
+    opacity: root._closing ? 0 : 1;
+    transform-scale: root._closing ? 0.92 : 1;
+    animate height { duration: 150ms; delay: 100ms; easing: ease-out; }
+    animate opacity { duration: 200ms; easing: ease-out; }
+    animate transform-scale { duration: 200ms; easing: ease-in; }  // EaseInFluent ≈ ease-in
+
+    // ---- 底框（圆角 2，左 3px 竖条 + 可选 1px 细边）----
+    back := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 2px;
+        clip: true;
+        background: root.tone-bg;
+        border-color: root.tone-fg;
+        border-width: root.has-border ? 1px : 0px;
+
+        // 左侧 3px 竖条（原版 BorderThickness 左侧恒为 3）
+        Rectangle {
+            x: 0; y: 0;
+            width: 3px;
+            height: 100%;
+            background: root.tone-fg;
+        }
+
+        // 整体点击（对应原版 MouseDown→MouseUp 的自定义事件）
+        // 声明在关闭按钮之前，保证关闭按钮在其上层接收点击
+        touch := TouchArea {
+            width: 100%;
+            height: 100%;
+            enabled: root.enabled && !root._closing;
+            clicked => { root.clicked(); }
+        }
+
+        // 文本（Padding 12,9，自动换行，不可交互）
+        txt := Text {
+            x: 12px;
+            y: 9px;
+            width: parent.width - 12px - (root.can-close ? 30px : 0px);
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.tone-fg;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            height: parent.height - 18px;
+        }
+
+        // 关闭按钮（20×20，右边距 8，lucide/x）
+        if root.can-close : Rectangle {
+            x: parent.width - 28px;
+            y: (parent.height - 20px) / 2;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            background: close-touch.has-hover ? root.tone-fg.with-alpha(0.12) : #00000000;
+            animate background { duration: 120ms; }
+
+            Image {
+                x: 4px; y: 4px;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../assets/icons/lucide/x.svg");
+                colorize: root.tone-fg;
+                image-fit: contain;
+            }
+
+            close-touch := TouchArea {
+                width: 100%;
+                height: 100%;
+                mouse-cursor: pointer;
+                enabled: root.enabled && !root._closing;
+                clicked => { root.close(); }
+            }
+        }
+    }
+}

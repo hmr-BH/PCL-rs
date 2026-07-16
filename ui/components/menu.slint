@@ -1,0 +1,175 @@
+// PCL-rs 右键菜单 — 1:1 移植 PCL-CE MyMenuItem + ContextMenu 样式
+//   （Controls/MyMenuItem.cs、Application.xaml 第 603~657 行的 ContextMenu / MenuItem 样式）
+//
+// 弹出层（ContextMenu 样式）：
+//   白底 ColorBrushWhite(#ffffff)，1px ColorBrush1(#343d4a) 边，圆角 3；
+//   阴影 DropShadow Opacity 0.4 / Blur 4 / Depth 2（向下）；
+//   点外部或 Esc 关闭（PopupWindow close-on-click-outside）。
+// 菜单项（MyMenuItem 样式 + RefreshColor）：
+//   高 26px；图标列 宽15 高12、左右边距 8（lucide SVG 随前景重着色）；
+//   文本 13px、右边距 40；
+//   悬停：底 ColorBrush6(#d5e6fd)、前景 ColorBrush2(#0b5bcb)，100ms；
+//   常态：透明底、前景 ColorBrush1，200ms；禁用：前景 ColorBrushGray5(#cccccc)。
+//
+// API：
+//   MyMenu：items 模型 + open(x, y) + triggered(index)；
+//   MyMenuItem 也可单独使用（自定义内容/测试）。
+//
+// 已知偏差：
+//   - 原版 SharedSizeGroup 跨项对齐图标列；此处由 MyMenu 检测任一项有图标后
+//     统一为所有项保留图标列（视觉效果一致），单独使用的 MyMenuItem 需自设 align-icons。
+//   - 原版无显式打开动画（系统菜单弹出）；此处加 100ms 淡入作为近似。
+//   - 悬停进/出颜色过渡统一 150ms（原版 100ms 进 / 200ms 出）。
+//   - 原版按配置设置不透明度（WindowOpacity/1000+0.4，默认 ≈1）；此处固定不透明。
+//   - 菜单位置由调用方给出（PopupWindow 坐标相对于声明它的组件），
+//     不做屏幕边界翻转（WPF 系统菜单会自动避让屏幕边缘）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 菜单项数据
+export struct MyMenuItemData {
+    text: string,
+    icon: image,
+    has-icon: bool,
+    enabled: bool,
+}
+
+// ==========================================================================
+// MyMenuItem — 单个菜单项（高 26px）
+// ==========================================================================
+export component MyMenuItem inherits Rectangle {
+    in property <string> text: "";
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> align-icons: false;   // 为图标列保留位置（整组对齐用）
+    in property <bool> enabled: true;
+    callback clicked();
+
+    property <brush> fg: !root.enabled ? GlobalTheme.gray5
+        : touch.has-hover ? GlobalTheme.color2 : GlobalTheme.color1;
+    // 图标列：宽15 + 左右边距8 → 文本起点 31px；无图标时文本左边距 8
+    property <length> _icon-col: (root.has-icon || root.align-icons) ? 31px : 8px;
+
+    height: 26px;
+    background: root.enabled && touch.has-hover ? GlobalTheme.color6 : #00000000;
+    animate background { duration: 150ms; }
+
+    if root.has-icon : Image {
+        x: 8px;
+        y: (parent.height - 12px) / 2;
+        width: 15px;
+        height: 12px;
+        source: root.icon;
+        colorize: root.fg;
+        image-fit: contain;
+        animate colorize { duration: 150ms; }
+    }
+
+    Text {
+        x: root._icon-col;
+        width: parent.width - self.x - 40px;   // 文本右边距 40
+        height: 16px;
+        text: root.text;
+        font-size: GlobalTheme.font-size;
+        font-family: GlobalTheme.font-family;
+        color: root.fg;
+        vertical-alignment: center;
+        overflow: elide;
+        animate color { duration: 150ms; }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ==========================================================================
+// MyMenu — 右键菜单弹出层（PopupWindow）
+// ==========================================================================
+export component MyMenu inherits Rectangle {
+    in property <[MyMenuItemData]> items: [];
+    callback triggered(int);
+
+    property <length> _x: 0px;
+    property <length> _y: 0px;
+    property <bool> _opened: false;
+
+    // 任一项有图标时，所有项保留图标列（近似原版 SharedSizeGroup）
+    function any-icon() -> bool {
+        // Slint 无法对模型做循环求值，这里按常见长度逐项检测（越界返回默认值，安全）
+        if root.items.length == 0 { return false; }
+        if root.items[0].has-icon { return true; }
+        if root.items.length > 1 && root.items[1].has-icon { return true; }
+        if root.items.length > 2 && root.items[2].has-icon { return true; }
+        if root.items.length > 3 && root.items[3].has-icon { return true; }
+        if root.items.length > 4 && root.items[4].has-icon { return true; }
+        if root.items.length > 5 && root.items[5].has-icon { return true; }
+        if root.items.length > 6 && root.items[6].has-icon { return true; }
+        if root.items.length > 7 && root.items[7].has-icon { return true; }
+        if root.items.length > 8 && root.items[8].has-icon { return true; }
+        if root.items.length > 9 && root.items[9].has-icon { return true; }
+        return false;
+    }
+
+    // 在 (x, y) 处打开菜单（坐标相对于本组件）
+    public function open(x: length, y: length) {
+        root._x = x;
+        root._y = y;
+        root._opened = false;
+        popup.show();
+        open-timer.running = true;
+    }
+    public function close() {
+        popup.close();
+    }
+
+    open-timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            root._opened = true;
+            self.running = false;
+        }
+    }
+
+    popup := PopupWindow {
+        x: root._x;
+        y: root._y;
+        close-policy: close-on-click-outside;
+
+        // 白底 + 1px ColorBrush1 边 + 圆角 3 + 阴影(Opacity0.4/Blur4/Depth2 向下)
+        Rectangle {
+            x: 0; y: 0;
+            width: lay.preferred-width;
+            height: lay.preferred-height;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: GlobalTheme.color1;
+            background: #ffffff;
+            drop-shadow-blur: 4px;
+            drop-shadow-offset-y: 2px;
+            drop-shadow-color: #00000066;   // Opacity 0.4 黑
+            opacity: root._opened ? 1 : 0;
+            animate opacity { duration: 100ms; }
+
+            lay := VerticalLayout {
+                padding: 1px;   // 原版 StackPanel Margin 0.5 取整
+                for item[i] in root.items : MyMenuItem {
+                    text: item.text;
+                    icon: item.icon;
+                    has-icon: item.has-icon;
+                    align-icons: root.any-icon();
+                    enabled: item.enabled;
+                    clicked => {
+                        popup.close();
+                        root.triggered(i);
+                    }
+                }
+            }
+        }
+    }
+}

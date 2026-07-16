@@ -1,0 +1,399 @@
+// ==========================================================================
+// PCL-rs 小部件：登录弹窗 MyMsgLogin + 档案选择弹窗 MyMsgAccountSelect — 1:1 移植
+// 原版文件：
+//   Pages/PageLaunch/MyMsgLogin.xaml + .xaml.cs（微软设备代码 OAuth 登录弹窗）
+//   Controls/MyMsg/MyMsgSelect.xaml + .xaml.cs（选择弹窗框架与按钮规则）
+//   Pages/PageLaunch/PageLoginProfile.xaml（档案列表 + "新建档案"按钮卡 idiom）
+//
+// ★ 重要说明（与任务描述的出入）：
+//   原版 MyMsgLogin 并非"多账号列表 + 输入框"弹窗，而是微软正版验证的
+//   设备代码弹窗：标题"登录 Minecraft"，正文提示授权码与验证网址，
+//   按钮为 重新打开网页(OpenUrl) / 复制代码(CopyText) / 取消。
+//   PCL-CE 的"多账号选择"由通用 MyMsgBoxSelect（= 已移植的 msg.slint
+//   MyMsgSelect）承载 MyListItem RadioBox 行（Title/Info/Logo，见
+//   MySkin.xaml.cs 披风选择、ModProfile.cs 验证方式选择）；
+//   "新建档案"按钮则出现在 PageLoginProfile 页面（user-plus 图标卡）。
+//   因此本文件包含两个组件：
+//   1. MyMsgLogin —— 原版设备代码弹窗的忠实移植；
+//   2. MyMsgAccountSelect —— 按任务规格用原版构件组合的多档案选择弹窗
+//      （MyMsgSelect 框架 + RadioBox 档案行 + PageLoginProfile 的新建按钮卡）。
+//
+// 框架/动画（与 components/msg.slint MsgCardBase 完全一致）：
+//   卡片：MinWidth 400、圆角 7、背景 window-background、阴影 ColorObjectMsgBoxShadow
+//     BlurRadius 20 Opacity 0.8（MyMsgLogin ShadowDepth=4，MyMsgSelect=2）；
+//   标题 23px ColorBrush2（警告 RedLight）+ 高 2 同色下划条 + 13px 间隔；
+//   内边距 22,22,22,23；按钮右对齐 Margin 150,0,8,0、间距 12、高 33；
+//   进入：opacity 0→1 120ms delay 60；Y 40→0 300ms delay 60 OutBack(Weak)
+//     = cubic-bezier(0.28,1.25,0.50,1.0)；旋转 -4→0 300ms delay 60 ease-out-quad；
+//   退出：opacity→0 80ms delay 20；Y→20 150ms cubic-bezier(0.215,0.61,0.355,1.0)；
+//     旋转→6 150ms ease-in-quad；旋转中心 (0, 0.5H)。
+//   MyMsgLogin 三按钮原版恒为 ColorType=Normal；MyMsgSelect 规则：Btn2 可见
+//     且非警告 → Btn1 Highlight，且未选择前 Btn1 禁用。
+//
+// 已知偏差：
+//   1. MyMsgLogin 的设备代码轮询/网页打开/剪贴板由 Rust 侧实现（原版
+//      WorkThreadAsync / CustomEventService），本组件仅发回调并携带数据。
+//   2. 拖拽（原版按 ShapeLine 上 Y≤2 判定 DragMove）与 msg.slint 一致：
+//      标题+下划条条带按下即发 request-drag，由主窗/Rust 移动窗口。
+//   3. 正文 Slint 无 LineHeight，行距取字体默认（≈1.2×15=18，与原版一致量级）。
+//   4. MyMsgAccountSelect 的"新建档案"按钮组合自 PageLoginProfile 页面 idiom，
+//      原版 MyMsgBoxSelect 弹窗本身无此按钮（ToolTip 未实现）。
+//   5. 档案行高取 MyListItem 默认 42px（原版 MyMsgBoxSelect 强制 MinHeight 24，
+//      但带 Info/Logo 的行会自动撑高至内容高度，观感与 42px 紧凑行一致）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyButton, ButtonState } from "../components/button.slint";
+import { MyListItem, ListItemType } from "../components/list_item.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+
+// 档案数据模型（对应原版 MyMsgBoxSelect 中的 MyListItem：Title/Info/Logo）
+export struct LoginAccountData {
+    icon: image,
+    has-icon: bool,
+    title: string,       // 玩家名 / 档案名
+    info: string,        // 副文本（验证方式 / UUID 等，12px opacity 0.6）
+}
+
+// ==========================================================================
+// 私有：LoginCardBase — 登录系弹窗框架（与 msg.slint MsgCardBase 完全一致的
+//   度量与进出动画；增加 shadow-depth 与 all-normal 两个原版差异参数）
+// ==========================================================================
+component LoginCardBase {
+    in property <string> title: "标题";
+    in property <bool> is-warn: false;
+    in property <string> btn1: "确定";
+    in property <string> btn2: "";
+    in property <string> btn3: "";
+    in property <bool> btn1-enabled: true;
+    in property <bool> all-normal: false;        // MyMsgLogin 三按钮恒 Normal
+    in property <length> shadow-depth: 2px;      // MyMsgLogin 原版 ShadowDepth=4
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> natural-width: 400px;
+
+    callback respond(int);        // 按钮序号 1/2/3
+    callback request-drag();      // 标题条带按下（请求拖动窗口）
+
+    // ---- 进入/退出动画（参数见文件头，与 msg.slint 一致）----
+    property <bool> entered: false;
+    Timer {
+        interval: 20ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    property <float> op-in: root.entered ? 1 : 0;
+    animate op-in { duration: 120ms; delay: 60ms; }
+    property <float> op-out: root.closing ? 0 : 1;
+    animate op-out { duration: 80ms; delay: 20ms; }
+
+    property <length> y-in: root.entered ? 0px : 40px;
+    animate y-in { duration: 300ms; delay: 60ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+    property <length> y-out: root.closing ? 20px : 0px;
+    animate y-out { duration: 150ms; easing: cubic-bezier(0.215, 0.61, 0.355, 1.0); }
+
+    property <angle> r-in: root.entered ? 0deg : -4deg;
+    animate r-in { duration: 300ms; delay: 60ms; easing: ease-out-quad; }
+    property <angle> r-out: root.closing ? 6deg : 0deg;
+    animate r-out { duration: 150ms; easing: ease-in-quad; }
+
+    property <brush> title-color: root.is-warn ? GlobalTheme.red-light : GlobalTheme.color2;
+
+    // 按钮文本测量（宽 = 文字 + 24px 内边距，与 msg.slint 相同）
+    m1 := Text { visible: false; text: root.btn1; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    m2 := Text { visible: false; text: root.btn2; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    m3 := Text { visible: false; text: root.btn3; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    property <length> b1w: m1.preferred-width + 24px;
+    out property <length> b1w-out: root.b1w;
+    property <length> b2w: m2.preferred-width + 24px;
+    out property <length> b2w-out: root.b2w;
+    property <length> b3w: m3.preferred-width + 24px;
+    out property <length> b3w-out: root.b3w;
+
+    width: min(root.max-dlg-width, max(400px, root.natural-width));
+    height: card-lay.preferred-height;
+
+    card := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 7px;
+        background: GlobalTheme.window-background;
+        drop-shadow-blur: 20px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: root.shadow-depth;
+        drop-shadow-color: GlobalTheme.msgbox-shadow.with-alpha(0.8);
+        opacity: root.op-in * root.op-out;
+        y: root.y-in + root.y-out;
+        transform-rotation: root.r-in + root.r-out;
+        transform-origin: { x: 0px, y: self.height / 2 };
+
+        // 吞掉卡片上的点击，防止穿透到遮罩
+        TouchArea { width: 100%; height: 100%; }
+
+        card-lay := VerticalLayout {
+            padding: 22px;
+            padding-bottom: 23px;
+
+            // ---- 标题（23px，Margin 7,-1,70,9）----
+            Rectangle {
+                preferred-height: title-t.preferred-height + 9px;
+                title-t := Text {
+                    x: 7px;
+                    y: 0px;
+                    width: parent.width - 77px;
+                    text: root.title;
+                    font-size: 23px;
+                    font-family: GlobalTheme.font-family;
+                    color: root.title-color;
+                    horizontal-alignment: left;
+                    vertical-alignment: top;
+                    overflow: elide;
+                    animate color { duration: 200ms; }
+                }
+            }
+
+            // ---- 标题下划条（高 2，与标题同色，通栏）----
+            Rectangle {
+                preferred-height: 2px;
+                background: root.title-color;
+                animate background { duration: 200ms; }
+            }
+
+            // ---- 间隔 13px ----
+            Rectangle { preferred-height: 13px; }
+
+            // ---- 内容槽（各弹窗注入）----
+            content-slot := Rectangle {
+                @children
+            }
+
+            // ---- 按钮行（右对齐，右留 8，间距 12，高 33）----
+            Rectangle {
+                preferred-height: 33px;
+
+                b3 := MyButton {
+                    x: parent.width - 8px - self.width;
+                    y: 0px;
+                    visible: root.btn3 != "";
+                    self-width: root.b3w;
+                    self-height: 33px;
+                    text: root.btn3;
+                    button-state: ButtonState.Normal;
+                    clicked => { root.respond(3); }
+                }
+                b2 := MyButton {
+                    x: (root.btn3 != "" ? b3.x - 12px : parent.width - 8px) - self.width;
+                    y: 0px;
+                    visible: root.btn2 != "";
+                    self-width: root.b2w;
+                    self-height: 33px;
+                    text: root.btn2;
+                    button-state: ButtonState.Normal;
+                    clicked => { root.respond(2); }
+                }
+                b1 := MyButton {
+                    x: (root.btn2 != "" ? b2.x - 12px : (root.btn3 != "" ? b3.x - 12px : parent.width - 8px)) - self.width;
+                    y: 0px;
+                    self-width: root.b1w;
+                    self-height: 33px;
+                    text: root.btn1;
+                    button-state: root.all-normal ? ButtonState.Normal
+                        : !root.btn1-enabled ? ButtonState.Disabled
+                        : root.is-warn ? ButtonState.Red
+                        : (root.btn2 != "" ? ButtonState.Highlighted : ButtonState.Normal);
+                    clicked => { root.respond(1); }
+                }
+            }
+        }
+
+        // ---- 拖拽条带（标题 + 下划条区域，原版 Drag 的近似）----
+        TouchArea {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 22px + title-t.preferred-height + 9px + 2px;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.request-drag();
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgLogin — 微软设备代码 OAuth 登录弹窗（原版 Pages/PageLaunch/MyMsgLogin）
+// ==========================================================================
+export component MyMsgLogin {
+    in property <string> title: "登录 Minecraft";     // 原版 Launch.Account.LoginDialog.MinecraftLogin
+    in property <string> caption: "";                 // 说明文本（含授权码与网址，由 Rust 按语言模板填充）
+    in property <string> user-code: "";               // 授权码（Btn2 复制内容）
+    in property <string> website: "";                 // 验证网址（Btn1 打开目标）
+    in property <string> btn1: "重新打开网页";         // 原版 Launch.Account.LoginDialog.ReopenWebpage
+    in property <string> btn2: "复制代码";             // 原版 Launch.Account.LoginDialog.CopyCode
+    in property <string> btn3: "取消";                 // 原版 Common.Action.Cancel
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 300px;
+
+    callback reopen-webpage(string);   // Btn1（原版 EventType=OpenUrl，携带 website）
+    callback copy-code(string);        // Btn2（原版 EventType=CopyText，携带 user-code）
+    callback cancel();                 // Btn3（原版 Finished(ThreadInterruptedException)）
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    // 正文/标题自然宽度测量（与 msg.slint MyMsgText 相同公式）
+    cap-measure := Text { visible: false; text: root.caption; font-size: 15px; font-family: GlobalTheme.font-family; }
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    property <length> natural: max(400px,
+        cap-measure.preferred-width + 8px + 15px + 44px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + (root.btn3 != "" ? 12px + base.b3w-out : 0px) + 150px + 8px + 44px);
+
+    base := LoginCardBase {
+        title: root.title;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn3: root.btn3;
+        all-normal: true;              // 原版三按钮恒 ColorType=Normal
+        shadow-depth: 4px;             // 原版 MyMsgLogin ShadowDepth=4
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => {
+            if i == 1 { root.reopen-webpage(root.website); }
+            else if i == 2 { root.copy-code(root.user-code); }
+            else if i == 3 { root.cancel(); }
+        }
+        request-drag => { root.request-drag(); }
+
+        // 正文（Padding 7,0,15,0；Margin 0,0,0,17；15px ColorBrush1 自动换行）
+        Rectangle {
+            preferred-height: Math.clamp(cap-text.preferred-height + 2px, 20px, root.max-body-height) + 17px;
+            clip: true;
+            cap-flick := Flickable {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height - 17px;
+                viewport-width: self.width;
+                viewport-height: cap-text.preferred-height + 2px;
+                cap-text := Text {
+                    x: 8px;
+                    y: 1px;
+                    width: cap-flick.width - 8px - 15px;
+                    text: root.caption;
+                    font-size: 15px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.color1;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgAccountSelect — 多档案选择弹窗（组合原版 MyMsgBoxSelect + PageLoginProfile）
+// ==========================================================================
+export component MyMsgAccountSelect {
+    in property <string> title: "选择档案";
+    in property <[LoginAccountData]> accounts: [];
+    in-out property <int> selected-index: -1;
+    in property <string> btn1: "确定";
+    in property <string> btn2: "取消";
+    in property <bool> show-add: true;          // 显示"新建档案"按钮卡（PageLoginProfile idiom）
+    in property <bool> is-warn: false;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 280px;
+
+    callback respond(int);         // 按钮序号 1=确定（读取 selected-index）/ 2=取消
+    callback add-account();        // "新建档案"（原版 PageLoginProfile BtnNew_Click）
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    property <length> natural: max(400px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + 150px + 8px + 44px);
+
+    // 内容高度：档案行 42px ×N + 新建按钮卡（31 + 间距 4）
+    property <length> list-height: root.accounts.length * 42px;
+    property <length> body-height: Math.clamp(root.list-height, 42px, root.max-body-height)
+        + (root.show-add ? 35px : 0px);
+
+    base := LoginCardBase {
+        title: root.title;
+        is-warn: root.is-warn;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn1-enabled: root.selected-index >= 0;   // 原版未选择前 Btn1 禁用
+        shadow-depth: 2px;                        // 原版 MyMsgSelect ShadowDepth=2
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => { root.respond(i); }
+        request-drag => { root.request-drag(); }
+
+        // 档案列表（Margin 0,0,0,17；MyListItem RadioBox 行）
+        Rectangle {
+            preferred-height: root.body-height + 17px;
+            clip: true;
+
+            acc-flick := Flickable {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height - 17px;
+                viewport-width: self.width;
+                viewport-height: root.list-height;
+                interactive: root.list-height > root.body-height;
+
+                VerticalLayout {
+                    width: acc-flick.width;
+                    for acc[i] in root.accounts : MyListItem {
+                        title: acc.title;
+                        info: acc.info;
+                        icon: acc.icon;
+                        show-icon: acc.has-icon;
+                        item-type: ListItemType.RadioBox;
+                        item-height: 42px;
+                        checked: root.selected-index == i;
+                        clicked => { root.selected-index = i; }
+                    }
+                }
+            }
+
+            // "新建档案"按钮卡（PageLoginProfile PanButtons：MyCard 圆角 5 +
+            //  StackPanel Margin 10,3 + user-plus 图标按钮，水平居中）
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: Math.clamp(root.list-height, 42px, root.max-body-height) + 4px;
+                width: 47px;
+                height: 31px;
+                visible: root.show-add;
+                border-width: 2px;
+                border-radius: 5px;
+                background: GlobalTheme.card-background;
+                border-color: GlobalTheme.card-border-color;
+                drop-shadow-blur: 6px;
+                drop-shadow-offset-y: 2px;
+                drop-shadow-color: #343d4a0d;
+
+                MyIconButton {
+                    x: 10px;
+                    y: 3px;
+                    self-width: 24px;
+                    self-height: 24px;
+                    logo-scale: 1.08;
+                    icon: @image-url("../assets/icons/lucide/user-plus.svg");
+                    clicked => { root.add-account(); }
+                }
+            }
+        }
+    }
+}

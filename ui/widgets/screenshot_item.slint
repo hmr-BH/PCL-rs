@@ -1,0 +1,130 @@
+// ==========================================================================
+// PCL-rs 截图卡片 —— 1:1 移植 PCL-CE 截图管理页的截图项
+//   原版文件：Pages/PageInstance/PageInstanceScreenshot.xaml.cs（LoadDefault 内 myCard 构建）
+//
+// 结构（原版 MyCard 无标题，Margin=7，WrapPanel 横排）：
+//   Grid 行：9px 顶留白 / 120px 图片区 / 按钮行；
+//   图片：Stretch=Uniform（完整显示、保持比例），解码上限 400×200（即宽 ≤ 240px），
+//     手型光标，点击 → 系统默认程序打开大图；
+//   按钮行：StackPanel 水平居中、Margin 3,5,3,5，三个 MyIconTextButton
+//     （LogoScale 0.8）：打开 folder-open / 删除 trash-2 / 复制 copy；
+//   卡片出现：opacity 0→1 200ms；
+//   文件名仅以 ToolTip（相对路径）呈现，卡片上不显示文字。
+//
+// 已知偏差：
+//   1. 卡片外壳采用 PCL-rs MyCard 既有视觉（2px 边、card-background 底、悬停阴影）；
+//   2. 卡片宽度 = 120px × 图片宽高比，钳制 [60, 240]（原版解码上限 400×200 →
+//      最大宽高比 2:1）；data.name 仅作数据透传（原版只用于 ToolTip），不渲染；
+//   3. 按钮文本（打开/删除/复制）为带默认值的可覆盖属性（原版走语言资源）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconTextButton } from "../components/icon_text_button.slint";
+
+// 截图卡片数据
+export struct ScreenshotItemData {
+    thumbnail: image,       // 截图缩略图
+    name: string,           // 文件名（原版仅 ToolTip 用，不渲染）
+}
+
+export component ScreenshotItem {
+    in property <ScreenshotItemData> data;
+    in property <string> text-open: "打开";
+    in property <string> text-delete: "删除";
+    in property <string> text-copy: "复制";
+
+    callback image-clicked();    // 点击图片（系统默认程序打开）
+    callback open-clicked();     // 打开（所在文件夹）
+    callback delete-clicked();   // 删除
+    callback copy-clicked();     // 复制（文件进剪贴板）
+
+    // 图片宽高比（无图时按 16:9 占位）
+    property <float> _ratio: root.data.thumbnail.width > 0 && root.data.thumbnail.height > 0
+        ? root.data.thumbnail.width / root.data.thumbnail.height : 16 / 9;
+
+    // 宽 = 120 × 宽高比，钳制 [60, 240]；高 = 9 + 120 + (27 + 5×2) = 166
+    width: max(60px, min(240px, 120px * root._ratio));
+    height: 166px;
+
+    // ---- 出现动画（opacity 0→1 200ms）----
+    property <bool> _shown: false;
+    Timer {
+        interval: 1ms;
+        running: !root._shown;
+        triggered => { root._shown = true; }
+    }
+    opacity: root._shown ? 1 : 0;
+    animate opacity { duration: 200ms; }
+
+    // ---- 卡片外壳（视觉同 PCL-rs MyCard，无标题头）----
+    chrome := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-width: 2px;
+        border-radius: 5px;
+        background: hover-touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+        border-color: hover-touch.has-hover ? GlobalTheme.card-border-color-hover : GlobalTheme.card-border-color;
+        drop-shadow-blur: hover-touch.has-hover ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: hover-touch.has-hover ? 0px : 2px;
+        drop-shadow-color: hover-touch.has-hover ? #4890f533 : #343d4a0d;
+        clip: true;
+
+        animate background { duration: 90ms; }
+        animate border-color { duration: 90ms; }
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        hover-touch := TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        // ---- 图片区（y=9、高 120、Uniform 完整显示、点击打开）----
+        Image {
+            x: 0;
+            y: 9px;
+            width: 100%;
+            height: 120px;
+            source: root.data.thumbnail;
+            image-fit: contain;   // = 原版 Stretch.Uniform
+        }
+        img-touch := TouchArea {
+            x: 0;
+            y: 9px;
+            width: 100%;
+            height: 120px;
+            mouse-cursor: pointer;
+            clicked => { root.image-clicked(); }
+        }
+
+        // ---- 按钮行（y=129、高 37 = Margin 5+27+5、水平居中）----
+        HorizontalLayout {
+            x: 0;
+            y: 129px;
+            width: 100%;
+            height: 37px;
+            alignment: center;
+
+            MyIconTextButton {
+                text: root.text-open;
+                icon: @image-url("../assets/icons/lucide/folder-open.svg");
+                logo-scale: 0.8;
+                clicked => { root.open-clicked(); }
+            }
+            MyIconTextButton {
+                text: root.text-delete;
+                icon: @image-url("../assets/icons/lucide/trash-2.svg");
+                logo-scale: 0.8;
+                clicked => { root.delete-clicked(); }
+            }
+            MyIconTextButton {
+                text: root.text-copy;
+                icon: @image-url("../assets/icons/lucide/copy.svg");
+                logo-scale: 0.8;
+                clicked => { root.copy-clicked(); }
+            }
+        }
+    }
+}

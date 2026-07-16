@@ -1,0 +1,262 @@
+// ==========================================================================
+// PCL-rs 下拉框 MyComboBox + 下拉项 MyComboBoxItem — 1:1 移植
+// 原版文件：
+//   Controls/MyComboBox.cs、Controls/MyComboBoxItem.cs
+//   Application.xaml：<Style TargetType="local:MyComboBox">（423 行起）、
+//   ToggleButton 模板（箭头 M1,1L4.5,4.5L8,1）、MyComboBoxItem 样式（568 行起）
+// 关键参数（原版）：
+//   圆角 3，边框 1（BorderBrush=Foreground），内容边距 8.5,0,21.5,0，字号 13
+//   颜色（Foreground 同时驱动边框/箭头/收起态文本）：
+//     按下或展开或可编辑聚焦：ColorBrush3 / ColorBrush7（10ms）
+//     悬停：ColorBrush4 / ColorBrush7（100ms）
+//     常态：ColorBrushBg0 / ColorBrushHalfWhite（100ms）
+//     禁用：ColorBrushGray5 / ColorBrushGray6（200ms）
+//   箭头：宽 9 高 4.5，描边 1.5，展开时旋转 180°（200ms CircleEase EaseOut，
+//     近似 cubic-bezier(0.075,0.82,0.165,1)）
+//   弹层：白底、圆角 3、边框跟随 Foreground、MaxDropDownHeight 160、
+//     VerticalOffset -1.5、PopupAnimation=Fade、空列表时高 26
+//   列表项：Padding 6,4（≈26px）；选中 ColorBrush6（100ms）、
+//     悬停 ColorBrush8（100ms）、还原透明（300ms）、禁用透明度 0.4（300ms）
+// 已知偏差：
+//   1. Slint PopupWindow 关闭事件无法回读：用内部 _open 标记跟踪。若弹层被
+//      “点击外部/Escape”关闭，标记会滞后一次点击（下次点头部只同步标记）。
+//   2. 弹层淡入用 150ms opacity 近似 WPF Fade；关闭即时无淡出。
+//   3. 箭头旋转中心为元素中心（原版 RenderTransformOrigin 0.3,0.5）。
+//   4. 未实现下拉框键盘上下导航与可编辑项的“删除按钮”模板
+//      （ComboBoxItemTemplateWithDelete）。
+//   5. 原版无固定高度（随内容与页面拉伸），本组件按迁移规范取 28px。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyTextBox } from "./text_box.slint";
+
+// ==========================================================================
+// MyComboBoxItem — 下拉列表项
+// ==========================================================================
+export component MyComboBoxItem {
+    in property <string> text: "";
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    in property <bool> use-own-font: false;   // FontSelector：项居中 + 以自身字体渲染
+    callback clicked();
+
+    min-height: 26px;
+    max-height: 26px;
+
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    Rectangle {
+        width: 100%; height: 100%;
+        // 选中 ColorBrush6 / 悬停 ColorBrush8 / 常态透明；淡入 100ms、淡出 300ms
+        background: root.selected ? GlobalTheme.color6
+            : touch.has-hover ? GlobalTheme.color8
+            : Colors.transparent;
+        animate background { duration: root.selected || touch.has-hover ? 100ms : 300ms; }
+        opacity: root.enabled ? 1 : 0.4;
+        animate opacity { duration: 300ms; }
+
+        Text {
+            x: root.use-own-font ? 0px : 6px;    // Padding 6,4
+            width: parent.width - (root.use-own-font ? 0px : 12px);
+            height: 100%;
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: root.use-own-font && root.text != "" ? root.text : GlobalTheme.font-family;
+            color: GlobalTheme.color1;
+            vertical-alignment: center;
+            horizontal-alignment: root.use-own-font ? center : left;
+            overflow: elide;
+        }
+    }
+}
+
+// ==========================================================================
+// MyComboBox — 下拉框
+// ==========================================================================
+export component MyComboBox {
+    in property <[string]> model: [];
+    in-out property <int> current-index: -1;
+    in property <bool> editable: false;
+    in-out property <string> text: "";             // 可编辑模式的文本
+    in property <string> hint-text: "";            // 可编辑模式的水印
+    in property <bool> enabled: true;
+    in property <length> max-drop-down-height: 160px;
+    in property <bool> item-use-own-font: false;   // FontSelector 项模板
+    out property <bool> is-open: root._open;
+    out property <string> current-text: root.editable ? root.text : root.sel-text;
+
+    callback changed(int, string);                 // 选择改变（原版 SelectionChanged → RaiseCustomEvent）
+    callback edited(string);                       // 可编辑文本改变（原版 TextChanged）
+
+    private property <bool> _open: false;
+    private property <float> popup-fade: 0;
+    property <string> sel-text: root.current-index >= 0 && root.current-index < root.model.length
+        ? root.model[root.current-index] : "";
+    property <length> content-height: root.model.length * 26px;
+    property <length> popup-height: root.model.length == 0 ? 26px
+        : min(root.content-height, root.max-drop-down-height);
+
+    public function open-popup() {
+        root._open = true;
+        root.popup-fade = 1;
+        popup.show();
+    }
+    public function close-popup() {
+        root._open = false;
+        root.popup-fade = 0;
+        popup.close();
+    }
+    function toggle-popup() {
+        if root._open { root.close-popup(); } else { root.open-popup(); }
+    }
+
+    // 模型变短时收敛选中索引（与 std ComboBox 行为一致）
+    changed model => {
+        if root.current-index >= root.model.length {
+            root.current-index = root.model.length - 1;
+        }
+    }
+
+    // ---- 颜色（原版 RefreshColor，动画时长取目标状态时长） ----
+    property <bool> pressed-state: touch.pressed || root._open
+        || (root.editable && tb.has-focus);
+    property <brush> fore-color: {
+        if !root.enabled { GlobalTheme.gray5 }
+        else if root.pressed-state { GlobalTheme.color3 }
+        else if touch.has-hover { GlobalTheme.color4 }
+        else { GlobalTheme.color-bg0 }
+    };
+    property <brush> back-color: {
+        if !root.enabled { GlobalTheme.gray6 }
+        else if root.pressed-state || touch.has-hover { GlobalTheme.color7 }
+        else { GlobalTheme.color-half-white }
+    };
+    // 注意：animate duration 绑定在 enabled:false 实例中若被常量折叠并移除，
+    // 会触发 Slint 编译器 remove_unused 内部 panic。下列写法保证禁用实例中
+    // 各分支值仍不同（禁用实例颜色恒定、动画本就不会播放），从而永不折叠。
+    property <duration> color-time: {
+        if root.pressed-state { 10ms }
+        else if touch.has-hover { 100ms }
+        else { !root.enabled ? 200ms : 100ms }
+    };
+
+    height: 28px;
+
+    // ===== 主体（边框 + 背景 + 内容 + 箭头） =====
+    bg := Rectangle {
+        width: 100%; height: 100%;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: root.fore-color;
+        background: root.back-color;
+        animate border-color { duration: root.color-time; }
+        animate background { duration: root.color-time; }
+
+        // 原版 ToggleButton：ClickMode=Press 覆盖全区，点击切换展开
+        touch := TouchArea {
+            width: 100%; height: 100%;
+            enabled: root.enabled;
+            clicked => { root.toggle-popup(); }
+        }
+
+        // 收起态内容（非可编辑：SelectionBoxItem，Margin 8.5,0,21.5,0）
+        if !root.editable : Text {
+            x: 8.5px;
+            width: max(0px, parent.width - 8.5px - 21.5px);
+            height: 100%;
+            text: root.sel-text;
+            // 原版 ContentPresenter 继承动画 Foreground（与边框/箭头同色）
+            color: root.fore-color;
+            animate color { duration: root.color-time; }
+            font-size: GlobalTheme.font-size;
+            font-family: root.item-use-own-font && root.sel-text != ""
+                ? root.sel-text : GlobalTheme.font-family;
+            vertical-alignment: center;
+            horizontal-alignment: root.item-use-own-font ? center : left;
+            overflow: elide;
+        }
+
+        // 可编辑：内嵌 MyTextBox（BorderThickness=0，Margin 1.5,0,21.5,0）
+        tb := MyTextBox {
+            visible: root.editable;
+            x: 1.5px;
+            width: max(0px, parent.width - 1.5px - 21.5px);
+            height: 100%;
+            box-height: parent.height;
+            border-width: 0px;
+            has-background: false;
+            enabled: root.enabled;
+            hint-text: root.hint-text;
+            text <=> root.text;
+            edited(t) => {
+                // 原版：文本被手动修改后取消选中项
+                root.current-index = -1;
+                root.edited(t);
+            }
+            accepted => { root.close-popup(); }
+        }
+
+        // 箭头（Path M1,1L4.5,4.5L8,1，描边 1.5，展开旋转 180°）
+        Path {
+            x: parent.width - 1.5px - 15px + 3px;
+            y: (parent.height - 4.5px) / 2;
+            width: 9px; height: 4.5px;
+            viewbox-width: 9; viewbox-height: 4.5;
+            commands: "M1,1 L4.5,4.5 L8,1";
+            stroke: root.fore-color;
+            animate stroke { duration: root.color-time; }
+            stroke-width: 1.5px;
+            transform-rotation: root._open ? 180deg : 0deg;
+            animate transform-rotation {
+                duration: 200ms;
+                easing: cubic-bezier(0.075, 0.82, 0.165, 1);   // CircleEase EaseOut 近似
+            }
+        }
+    }
+
+    // ===== 下拉弹层（白底、边框跟随 Foreground、Fade 淡入） =====
+    popup := PopupWindow {
+        close-policy: close-on-click-outside;
+        x: 0px;
+        y: root.height - 1.5px;                    // 原版 VerticalOffset=-1.5
+        width: root.width;
+        height: root.popup-height;
+
+        Rectangle {
+            width: 100%; height: 100%;
+            background: Colors.white;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: root.fore-color;
+            opacity: root.popup-fade;
+            animate opacity { duration: 150ms; }
+            clip: true;
+
+            Flickable {
+                width: 100%; height: 100%;
+                viewport-width: self.width;
+                viewport-height: root.content-height;
+                interactive: root.content-height > root.popup-height;
+
+                VerticalLayout {
+                    alignment: start;
+                    for item[i] in root.model : MyComboBoxItem {
+                        text: item;
+                        selected: i == root.current-index;
+                        use-own-font: root.item-use-own-font;
+                        clicked => {
+                            root.current-index = i;
+                            if root.editable { root.text = item; }
+                            root.changed(i, item);
+                            root.close-popup();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

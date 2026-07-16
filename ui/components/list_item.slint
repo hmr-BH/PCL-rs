@@ -1,0 +1,179 @@
+// PCL-rs 列表项 — 1:1 移植 PCL-CE MyListItem（Controls/MyListItem.xaml + .xaml.cs）
+//
+// 结构（原版 Grid 列）：勾选条留白列(2/4/6px) + 左缩进列 + 图标列(34px + 高≥40 时 +4)
+//   + 图标(Auto) + 标题(1*) + 右缩进列(默认 4，悬停有按钮时展开 5+N*25)。
+//   默认高度 42px；<40px 为紧凑模式（图标边距 6/4、标题无底边距、勾选前景用 ColorBrush3）。
+// 状态色（RefreshColor / SetChecked）：
+//   悬停底 RectBack：圆角 6（缩放动画开启或高>40），1px ColorBrush6 边，
+//     悬停 ColorBrushBg1(#bee0eafd)、按下 ColorBrush6(#d5e6fd)，opacity 0→1；
+//   前景：选中 = 高<40 ? ColorBrush3(#1370f3) : ColorBrush2(#0b5bcb)，否则 ColorBrush1(#343d4a)；
+//   勾选条 rectCheck：宽 5、高 20、圆角 2、ColorBrush3，x=-1 垂直居中，
+//     选中时 ScaleY 0→1 300ms OutBack(Weak)（此处用高度 0→20 同缓动近似），
+//     取消时 120ms InFluent 缩回 + 70ms(delay 40) 淡出。
+// 交互：
+//   按下整项 scale→0.98，松开回弹；RectBack 悬停 0.996→1。
+//   Type=RadioBox/CheckBox 时点击切换 checked（RadioBox 仅置 true）。
+//
+// 已知偏差：
+//   - 原版 RadioBox 同组互斥由父容器枚举子控件实现；Slint 无法枚举兄弟节点，
+//     互斥逻辑由宿主（页面/Rust 侧）维护，本组件只在点击时请求选中。
+//   - RectBack 离场时的 0.996→0.75 收缩细节省略（opacity 已归 0，不可见）。
+//   - Logo 仅支持 image（lucide SVG / 位图），原版 WPF path / 网络图片未做；
+//     LogoClickable 未实现。
+//   - Tags 标签行未移植（原版已是后加载边缘功能）。
+//   - 颜色过渡统一 150ms（原版 120/180ms 分态）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 列表项类型（对应原版 MyListItem.CheckType）
+export enum ListItemType {
+    None,
+    Clickable,
+    RadioBox,
+    CheckBox,
+}
+
+export component MyListItem inherits Rectangle {
+    in property <string> title: "";
+    in property <string> info: "";                 // 副文本（12px、opacity 0.6），空则不显示
+    in property <image> icon;                      // 图标（lucide SVG，用 colorize 随前景重着色）
+    in property <bool> show-icon: false;
+    in property <length> item-height: 42px;
+    in property <int> font-size: 14;               // 原版默认 14
+    in property <ListItemType> item-type: ListItemType.None;
+    in-out property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <int> extra-padding-left: 0;   // 原版 PaddingLeft（左缩进列）
+    in property <int> min-padding-right: 4;
+    in property <int> trailing-buttons: 0;         // 右侧按钮数（悬停时右缩进展开 5+N*25）
+    in property <bool> scale-animation: true;
+
+    callback clicked();            // 任意类型点击
+    callback changed(bool);        // checked 变化（RadioBox/CheckBox）
+
+    property <bool> _compact: root.item-height < 40px;
+    property <bool> _checkable: root.item-type == ListItemType.RadioBox
+                             || root.item-type == ListItemType.CheckBox;
+    // 各列宽（对应原版 OnSizeChanged / Type setter）
+    property <length> _col-check: root._checkable ? 6px : (root._compact ? 4px : 2px);
+    property <length> _col-logo: (root.show-icon ? 34px : 0px) + (root._compact ? 0px : 4px);
+    property <length> _pad-right: touch.has-hover
+        ? max(root.min-padding-right * 1px, 5px + root.trailing-buttons * 25px)
+        : root.min-padding-right * 1px;
+    animate _pad-right { duration: 120ms; }
+
+    // 前景色：选中 = compact?ColorBrush3:ColorBrush2（200ms），取消回 ColorBrush1（120ms）
+    property <brush> fg: !root.enabled ? GlobalTheme.gray4
+        : root.checked ? (root._compact ? GlobalTheme.color3 : GlobalTheme.color2)
+        : GlobalTheme.color1;
+
+    height: root.item-height;
+    background: GlobalTheme.color-semi-transparent;   // 原版 Background=ColorBrushSemiTransparent
+    transform-scale: root.scale-animation && touch.pressed
+        && !(root.item-type == ListItemType.RadioBox && root.checked) ? 0.98 : 1.0;
+    animate transform-scale { duration: 110ms; easing: ease-out; }
+
+    // ---- 悬停底 RectBack ----
+    rect-back := Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: root.scale-animation || root.item-height > 40px ? 6px : 0px;
+        border-width: 1px;
+        border-color: GlobalTheme.color6;
+        background: touch.pressed ? GlobalTheme.color6 : GlobalTheme.color-bg1;
+        opacity: touch.has-hover ? 1 : 0;
+        transform-scale: touch.has-hover ? 1.0 : 0.996;
+        animate background { duration: 150ms; }
+        animate opacity { duration: 150ms; }
+        animate transform-scale { duration: 190ms; easing: ease-out; }
+    }
+
+    // ---- 勾选条 rectCheck（宽 5、高 0/20、圆角 2、ColorBrush3、x=-1 居中）----
+    rect-check := Rectangle {
+        x: -1px;
+        y: (root.height - self.height) / 2;
+        width: 5px;
+        height: root.checked ? 20px : 0px;
+        border-radius: 2px;
+        background: GlobalTheme.color3;
+        opacity: root.checked ? 1 : 0;
+        visible: root._checkable;
+        // 选中：高度 0→20 300ms OutBack(Weak)；取消同参数回缩（原版为 120ms InFluent，见偏差说明）
+        animate height { duration: 300ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+        animate opacity { duration: 120ms; }
+    }
+
+    // ---- 图标（lucide，随前景重着色；边距 compact?6,8,4,8 : 8,8,6,8）----
+    if root.show-icon : Image {
+        x: root._col-check + root.extra-padding-left * 1px + (root._compact ? 6px : 8px);
+        y: 8px;
+        width: root._col-logo - (root._compact ? 10px : 14px);
+        height: root.item-height - 16px;
+        source: root.icon;
+        colorize: root.fg;
+        image-fit: contain;
+        animate colorize { duration: 150ms; }
+    }
+
+    // ---- 标题 + 副文本（垂直居中成组；标题左边距 4、底边距 compact?0:2）----
+    VerticalLayout {
+        x: root._col-check + root.extra-padding-left * 1px + root._col-logo + 4px;
+        width: parent.width - self.x - root._pad-right;
+        height: 100%;
+        alignment: center;
+
+        Text {
+            text: root.title;
+            font-size: root.font-size * 1px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            overflow: elide;
+            animate color { duration: 150ms; }
+        }
+        if root.info != "" : Text {
+            text: root.info;
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            opacity: 0.6;
+            overflow: elide;
+            animate color { duration: 150ms; }
+        }
+    }
+
+    // ---- 右侧按钮槽（悬停淡入；按钮由调用方以默认子元素传入，建议 25×25）----
+    trail := Rectangle {
+        x: parent.width - trail-lay.preferred-width - 5px;
+        width: trail-lay.preferred-width;
+        height: 100%;
+        opacity: touch.has-hover ? 1 : 0;
+        animate opacity { duration: 120ms; }
+        trail-lay := HorizontalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            @children
+        }
+    }
+
+    // ---- 交互 ----
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: root.item-type == ListItemType.None ? default : pointer;
+        clicked => {
+            if root.item-type == ListItemType.RadioBox {
+                if !root.checked {
+                    root.checked = true;
+                    root.changed(true);
+                }
+            } else if root.item-type == ListItemType.CheckBox {
+                root.checked = !root.checked;
+                root.changed(root.checked);
+            }
+            root.clicked();
+        }
+    }
+}

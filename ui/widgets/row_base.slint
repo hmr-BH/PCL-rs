@@ -1,0 +1,213 @@
+// ==========================================================================
+// PCL-rs 行部件基座（widgets 私有）—— MyListItem(Clickable, 42px) + Tags 标签行
+//   原版文件：Controls/MyListItem.xaml(.cs)
+//
+// 存在原因：PCL-rs components/list_item.slint 尚未移植原版的 Tags 标签行
+//   （原版 MyListItem.Tags：标签 chips 位于标题列下方、副文本左侧，
+//   Grid.Column=3 Row=2，LabInfo 位于 Column=4 Row=2）。
+//   本基座 1:1 复刻 list_item.slint 的 Clickable/42px 外观与动画，并补上
+//   Tags 行，供 instance_item / version_item / save_item 组合使用。
+//
+// 与 list_item.slint 的差异（仅新增，不改既有度量）：
+//   1. 图标为位图（实例 Logo / 存档 icon.png / 版本类型图），不做 colorize；
+//   2. 副文本行前可带 Tags chips（样式见 TagChip，完全按原版 MyListItem.Tags：
+//      底 #11000000、文字 11px #868686、圆角 3、Padding 3,1、右间距 3）；
+//   3. TouchArea 置于按钮之下（原版 WPF 按钮在 item 之上，可正常点击）。
+//
+// 关键度量（与 list_item.slint 一致）：
+//   高 42；勾选留白列 2；图标列 34+4；图标 24×26 位于 (10+padleft, 8)；
+//   文本列 x = 6 + padleft + 图标列；标题 14px ColorBrush1；副文本 12px opacity 0.6；
+//   悬停底：圆角 6、1px ColorBrush6 边、Bg1 底/按下 ColorBrush6、opacity/scale 动画；
+//   按下整项 scale 0.98；右侧按钮 25×25、悬停淡入，右缩进 5+N*25。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 标签颜色种类。原版 MyListItem.Tags 仅有一种灰样式（Gray）；
+// Blue/Red 为扩展（原版其它页面的彩色标签语义，如 "稳定版/预览版" 提示）。
+export enum TagKind { Gray, Blue, Red }
+
+// 单个标签数据
+export struct VersionTag {
+    text: string,
+    kind: TagKind,
+}
+
+// 标签 chip —— 原版：Border(底 #11000000, Padding 3,1, 圆角 3, 右 Margin 3)
+//   + TextBlock(11px, #868686)
+export component TagChip {
+    in property <string> text: "";
+    in property <TagKind> kind: TagKind.Gray;
+
+    property <brush> bg: root.kind == TagKind.Gray ? #11000000
+        : root.kind == TagKind.Blue ? GlobalTheme.color8
+        : GlobalTheme.red-back;
+    property <brush> fg: root.kind == TagKind.Gray ? #868686
+        : root.kind == TagKind.Blue ? GlobalTheme.color2
+        : GlobalTheme.red-dark;
+
+    width: rect.preferred-width;
+    height: rect.preferred-height;
+
+    rect := Rectangle {
+        width: txt.preferred-width + 6px;    // Padding 3,1 → 左右各 3
+        height: txt.preferred-height + 2px;  // 上下各 1
+        border-radius: 3px;
+        background: root.bg;
+
+        txt := Text {
+            x: 3px;
+            y: 1px;
+            text: root.text;
+            font-size: 11px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+        }
+    }
+}
+
+// ==========================================================================
+// ListRowBase —— 42px Clickable 行（位图图标 + 标题 + [标签+]副文本 + 右侧按钮）
+//   右侧按钮由调用方以默认子元素传入（建议 25×25 的 MyIconButton）。
+// ==========================================================================
+export component ListRowBase inherits Rectangle {
+    in property <image> icon;                       // 位图图标（不重着色）
+    in property <bool> show-icon: true;
+    in property <string> title: "";
+    in property <string> info: "";
+    in property <[VersionTag]> tags: [];
+    in property <bool> enabled: true;
+    in property <int> extra-padding-left: 0;
+    in property <int> min-padding-right: 4;
+    in property <int> trailing-buttons: 0;          // 右侧按钮数（决定悬停右缩进）
+
+    callback clicked();
+    callback right-clicked();
+
+    // 各列宽（对应原版 OnSizeChanged / Type=Clickable）
+    property <length> _col-check: 2px;
+    property <length> _col-logo: (root.show-icon ? 34px : 0px) + 4px;
+    property <length> _pad-right: touch.has-hover
+        ? max(root.min-padding-right * 1px, 5px + root.trailing-buttons * 25px)
+        : root.min-padding-right * 1px;
+    animate _pad-right { duration: 120ms; }
+
+    // 前景色：常态 ColorBrush1，禁用 ColorBrushGray4
+    property <brush> fg: root.enabled ? GlobalTheme.color1 : GlobalTheme.gray4;
+
+    height: 42px;
+    background: GlobalTheme.color-semi-transparent;
+    transform-scale: touch.pressed ? 0.98 : 1.0;
+    animate transform-scale { duration: 110ms; easing: ease-out; }
+
+    // ---- 悬停底 RectBack（圆角 6、ColorBrush6 边、Bg1 底、按下 ColorBrush6）----
+    rect-back := Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: GlobalTheme.color6;
+        background: touch.pressed ? GlobalTheme.color6 : GlobalTheme.color-bg1;
+        opacity: touch.has-hover ? 1 : 0;
+        transform-scale: touch.has-hover ? 1.0 : 0.996;
+        animate background { duration: 150ms; }
+        animate opacity { duration: 150ms; }
+        animate transform-scale { duration: 190ms; easing: ease-out; }
+    }
+
+    // ---- 位图图标（24×26 @ (10+padleft, 8)，不重着色；边距 8,8,6,8）----
+    if root.show-icon : Image {
+        x: root._col-check + root.extra-padding-left * 1px + 8px;
+        y: 8px;
+        width: root._col-logo - 14px;
+        height: 26px;
+        source: root.icon;
+        image-fit: contain;
+    }
+
+    // ---- 标题 + [标签行+]副文本（垂直居中成组）----
+    VerticalLayout {
+        x: root._col-check + root.extra-padding-left * 1px + root._col-logo + 4px;
+        width: parent.width - self.x - root._pad-right;
+        height: 100%;
+        alignment: center;
+
+        Text {
+            text: root.title;
+            font-size: 14px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            overflow: elide;
+            animate color { duration: 150ms; }
+        }
+
+        // 副文本行：无标签时与 list_item.slint 完全一致；
+        // 有标签时 = chips（右间距各 3）+ 副文本（与末 chip 净间距 4）
+        if root.tags.length == 0 && root.info != "" : Text {
+            text: root.info;
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            opacity: 0.6;
+            overflow: elide;
+            animate color { duration: 150ms; }
+        }
+        if root.tags.length > 0 : HorizontalLayout {
+            alignment: start;
+            spacing: 0px;
+
+            for tag in root.tags : Rectangle {
+                // chip 本体 + 右间距 3（原版 Margin 0,0,3,0）
+                width: chip.preferred-width + 3px;
+                height: chip.preferred-height;
+                chip := TagChip {
+                    x: 0;
+                    text: tag.text;
+                    kind: tag.kind;
+                }
+            }
+            // 副文本（原版 LabInfo 位于标签列右侧，Margin 左 4；
+            // 末 chip 右间距 3 与 PanTags 右 Margin -3 抵消，净 4）
+            if root.info != "" : Text {
+                text: root.info;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: root.fg;
+                opacity: 0.6;
+                overflow: elide;
+                horizontal-stretch: 1;
+                animate color { duration: 150ms; }
+            }
+        }
+    }
+
+    // ---- 行交互（置于按钮之下：原版按钮位于 item 上层）----
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                root.right-clicked();
+            }
+        }
+    }
+
+    // ---- 右侧按钮槽（悬停淡入；按钮 25×25 由调用方传入）----
+    trail := Rectangle {
+        x: parent.width - trail-lay.preferred-width - 5px;
+        width: trail-lay.preferred-width;
+        height: 100%;
+        opacity: touch.has-hover ? 1 : 0;
+        animate opacity { duration: 120ms; }
+        trail-lay := HorizontalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            @children
+        }
+    }
+}

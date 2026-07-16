@@ -1,0 +1,277 @@
+// PCL-rs radio button component — 1:1 port of PCL-CE MyRadioBox + MyRadioButton
+//
+// Two components:
+//   1. MyRadioBox — circle + dot radio (like a classic radio button)
+//      Animation: border shrink 18→10→18 bounce, dot 0→9 elastic grow
+//   2. MyRadioButton — pill-shaped selectable button with optional icon
+//      Two colors: White (white text on transparent) / Highlight (blue text on transparent)
+//
+// Easing formulas from PCL-CE ModAnimation.cs:
+//   AniEaseOutFluent(n):  f(t) = 1 - (1-t)^n      Weak=2 Mid=3 Strong=4 XStrong=5
+//   AniEaseOutBack(n):    f(t) = 1 - (1-t)^p·cos(1.5π·t)   p = 3 - n/2
+//   AniEaseInFluent(n):   f(t) = t^n
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// ==========================================================================
+// Radio theme colors
+// ==========================================================================
+
+export global RadioTheme {
+    // RadioBox colors (same as checkbox: ColorBrush1/2/3 etc.)
+    in-out property<brush> radio-border-unchecked: #343d4a;
+    in-out property<brush> radio-border-checked:   #0b5bcb;
+    in-out property<brush> radio-border-hover:     #1370f3;
+    in-out property<brush> radio-border-disabled:  #a6a6a6;
+    in-out property<brush> radio-text-normal:      #343d4a;
+
+    // RadioBox background (same as checkbox)
+    in-out property<brush> radio-background:       #f7f9fc;
+    in-out property<brush> radio-background-pressed: #bee0eafd;
+
+    // RadioButton White theme: white text, Blue(3) accent on hover
+    in-out property<brush> radiobtn-white-text:    #ffffff;
+    in-out property<brush> radiobtn-white-checked-text: #1370f3;
+    in-out property<brush> radiobtn-white-bg:      #00000000;
+    in-out property<brush> radiobtn-white-bg-hover: #0d000000;
+    in-out property<brush> radiobtn-white-bg-pressed: #11000000;
+    in-out property<brush> radiobtn-white-bg-checked: #ffffff;
+    in-out property<brush> radiobtn-white-bg-checked-hover: #e6f2ff;
+    in-out property<brush> radiobtn-white-bg-checked-pressed: #d0e5ff;
+
+    // RadioButton Highlight theme: Blue(3)/Blue(7) accent
+    in-out property<brush> radiobtn-hl-text:       #1370f3;
+    in-out property<brush> radiobtn-hl-text-checked:#ffffff;
+    in-out property<brush> radiobtn-hl-bg:          #00000000;
+    in-out property<brush> radiobtn-hl-bg-hover:    #0d1370f3;
+    in-out property<brush> radiobtn-hl-bg-pressed:  #111370f3;
+    in-out property<brush> radiobtn-hl-bg-checked:  #1370f3;
+    in-out property<brush> radiobtn-hl-bg-checked-hover: #1a6fe0;
+    in-out property<brush> radiobtn-hl-bg-checked-pressed: #0d5ab8;
+
+    // Shared
+    in-out property<brush> radiobtn-border:        #cccccc;
+    in-out property<brush> radiobtn-border-checked:#1370f3;
+    in-out property<brush> radiobtn-border-hover:  #1370f3;
+}
+
+
+// ==========================================================================
+// MyRadioButton — pill-shaped selectable toggle button
+// ColorType: White (default) or Highlight
+// ==========================================================================
+
+export enum RadioButtonColor { White, Highlight }
+
+export component MyRadioButton {
+    in property <string> text: "";
+    in property <bool> enabled: true;
+    in-out property <bool> checked: false;
+    in property <RadioButtonColor> color-type: RadioButtonColor.White;
+    callback clicked();
+
+    min-height: 27px;
+    max-height: 27px;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            if !root.checked {
+                root.checked = true;
+                root.clicked();
+            }
+        }
+    }
+
+    // ---- Dynamic colors based on ColorType + state ----
+    property <brush> fg: {
+        if root.color-type == RadioButtonColor.White {
+            if root.checked { RadioTheme.radiobtn-white-checked-text }
+            else { RadioTheme.radiobtn-white-text }
+        } else {  // Highlight
+            if root.checked { RadioTheme.radiobtn-hl-text-checked }
+            else { RadioTheme.radiobtn-hl-text }
+        }
+    };
+    property <brush> bg: {
+        if root.color-type == RadioButtonColor.White {
+            if root.checked {
+                if touch.pressed { RadioTheme.radiobtn-white-bg-checked-pressed }
+                else if touch.has-hover { RadioTheme.radiobtn-white-bg-checked-hover }
+                else { RadioTheme.radiobtn-white-bg-checked }
+            } else {
+                if touch.pressed { RadioTheme.radiobtn-white-bg-pressed }
+                else if touch.has-hover { RadioTheme.radiobtn-white-bg-hover }
+                else { RadioTheme.radiobtn-white-bg }
+            }
+        } else {  // Highlight
+            if root.checked {
+                if touch.pressed { RadioTheme.radiobtn-hl-bg-checked-pressed }
+                else if touch.has-hover { RadioTheme.radiobtn-hl-bg-checked-hover }
+                else { RadioTheme.radiobtn-hl-bg-checked }
+            } else {
+                if touch.pressed { RadioTheme.radiobtn-hl-bg-pressed }
+                else if touch.has-hover { RadioTheme.radiobtn-hl-bg-hover }
+                else { RadioTheme.radiobtn-hl-bg }
+            }
+        }
+    };
+    property <brush> border: {
+        if root.color-type == RadioButtonColor.Highlight && !root.checked {
+            if touch.has-hover { RadioTheme.radiobtn-border-hover }
+            else { RadioTheme.radiobtn-border }
+        } else {
+            Colors.transparent
+        }
+    };
+
+    // ---- Scale: press effect (original 0.98 on mousedown) ----
+    property <float> btn-scale: touch.pressed && !root.checked ? 0.98 : 1.0;
+
+    Rectangle {
+        border-radius: 13.5px;
+        border-width: 1px;
+        border-color: root.border;
+        background: root.bg;
+        transform-scale: root.btn-scale;
+        animate background { duration: 120ms; }
+        animate border-color { duration: 120ms; }
+        animate transform-scale { duration: 100ms; easing: ease-out; }
+
+        HorizontalLayout {
+            padding-left: 12px; padding-right: 12px;
+            alignment: center;
+
+            Text {
+                text: root.text;
+                font-size: GlobalTheme.font-size;
+                font-family: GlobalTheme.font-family;
+                color: root.fg;
+                vertical-alignment: center;
+                horizontal-alignment: center;
+                animate color { duration: 120ms; }
+            }
+        }
+    }
+}
+
+
+// ==========================================================================
+// MyRadioBox — circle radio (classic radio button)
+// ==========================================================================
+
+export component MyRadioBox {
+    in property <length> self-width: 160px;
+    in property <length> self-height: 22px;
+    in property <string> text: "RadioBox";
+    in property <bool> enabled: true;
+    in-out property <bool> checked: false;
+    callback clicked();
+
+    width: self-width;
+    height: self-height;
+
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => {
+            root.checked = true;
+            root.clicked();
+        }
+    }
+
+    // ---- Colors (same pattern as CheckBox) ----
+    property <brush> stroke-color: {
+        if !root.enabled { RadioTheme.radio-border-disabled }
+        else if touch.has-hover { RadioTheme.radio-border-hover }
+        else if root.checked { RadioTheme.radio-border-checked }
+        else { RadioTheme.radio-border-unchecked }
+    };
+    property <brush> text-color: {
+        if !root.enabled { RadioTheme.radio-border-disabled }
+        else if touch.has-hover { RadioTheme.radio-border-hover }
+        else { RadioTheme.radio-text-normal }
+    };
+    property <brush> bg: touch.pressed
+        ? RadioTheme.radio-background-pressed
+        : RadioTheme.radio-background;
+
+    // ---- Border bounce (AniScale: 10→18, 150ms EaseOutFluent; 18→10→18 bounce, 300ms EaseOutBack) ----
+    //   Checked: shrink 18→10 (150ms EaseOutFluent Weak=1-(1-t)^2),
+    //            spring 10→18 (300ms delay=90, EaseOutBack Middle p=1.5)
+    //   Unchecked: restore 18 (150ms EaseOutFluent Middle=1-(1-t)^3)
+    //   Press: shrink 18→16.5 (1000ms EaseOutFluent Strong=1-(1-t)^4)
+    private property <int> _bt: 0;
+    t1 := Timer { interval: 90ms; running: root._bt == 1; triggered => { root._bt = 2; } }
+    t2 := Timer { interval: 300ms; running: root._bt == 2; triggered => { root._bt = 0; } }
+    property <float> _bs: {
+        if touch.pressed { 0.917 }
+        else if root._bt == 0 { 1.0 }
+        else if root._bt == 1 { 0.556 }   // 10/18
+        else { 1.0 }
+    };
+
+    // ---- Dot (9px diameter circle). Scale 0→9 opacity 0→1 with back-ease ----
+    private property <float> _ds: 0.0;   // dot scale
+    private property <float> _do: 0.0;   // dot opacity
+    private property <int> _dt: 0;       // dot trigger
+    td := Timer {
+        interval: 90ms;
+        running: root._dt > 0;
+        triggered => { root._ds = 1.0; root._do = 1.0; root._dt = 0; }
+    }
+
+    changed checked => {
+        root._bt = 1;
+        if root.checked {
+            root._dt += 1;
+        } else {
+            root._ds = 0.0;
+            root._do = 0.0;
+        }
+    }
+
+    HorizontalLayout {
+        padding: 2px; spacing: 4px; alignment: start;
+
+        Rectangle {
+            width: 18px; height: 18px;
+
+            // ---- ShapeBorder (Ellipse in WPF → circle Rectangle in Slint) ----
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: 9px;
+                border-width: 1.1px;
+                border-color: root.stroke-color;
+                background: root.bg;
+                transform-scale: root._bs;
+                animate border-color { duration: 150ms; }
+                animate background { duration: 100ms; }
+                animate transform-scale { duration: 200ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+            }
+
+            // ---- ShapeDot (9px filled circle, centered at (4.5, 4.5)) ----
+            Rectangle {
+                x: 4.5px; y: 4.5px;
+                width: 9px; height: 9px;
+                border-radius: 4.5px;
+                background: root.stroke-color;
+                opacity: root._do;
+                transform-scale: root._ds;
+                animate background { duration: 150ms; }
+                animate opacity { duration: 300ms; easing: cubic-bezier(0.28, 1.18, 0.50, 1.0); }
+                animate transform-scale { duration: 300ms; easing: cubic-bezier(0.28, 1.18, 0.50, 1.0); }
+            }
+        }
+
+        Text {
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.text-color;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            animate color { duration: 200ms; }
+        }
+    }
+}

@@ -1,0 +1,708 @@
+// PCL-rs 对话框族 — 1:1 移植 PCL-CE MyMsg 系列（Controls/MyMsg/*.xaml + .xaml.cs）
+//
+// 移植自：
+//   MyMsgText.xaml(.cs)     普通文本弹窗
+//   MyMsgSelect.xaml(.cs)   选择弹窗（MyListItem RadioBox 列表）
+//   MyMsgInput.xaml(.cs)    输入弹窗（文本框 + 校验）
+//   MyMsgMarkdown.xaml(.cs) Markdown 弹窗
+//
+// 关键参数（原版 XAML/C#）：
+//   卡片：MinWidth 400、Margin 25（距窗口）、圆角 7、背景 window-background、
+//         阴影 ColorObjectMsgBoxShadow(#3c3c3c) BlurRadius 20 ShadowDepth 2 Opacity 0.8；
+//   标题：23px ColorBrush2（警告时 ColorBrushRedLight），下划条高 2 与标题同色；
+//   正文：15px ColorBrush1（LineHeight 18，Slint 无行高属性，用默认行距近似）；
+//   内边距：PanMain 22,22,22,23；标题 Margin 7,-1,70,9；正文区 Margin 0,0,0,17、Padding 7,0,15,0；
+//   按钮：右对齐 StackPanel Margin 150,0,8,0、按钮间距 12、高≈33（13px 字 + TextPadding7 + Padding5,0）；
+//   按钮态：IsWarn→Red；Btn2 可见且非 Red→Highlight；否则 Normal。
+//
+// 动画（原版 ModAnimation，此处用 Slint 等价缓动）：
+//   进入：遮罩 → #5A000000（警告 #8C500000）200ms 线性；
+//         卡片 opacity 0→1 120ms delay 60（线性）；
+//         Y 40→0 300ms delay 60 OutBack(Weak)=cubic-bezier(0.28,1.25,0.50,1.0)；
+//         旋转 -4→0 300ms delay 60 OutFluent(Weak)=ease-out-quad（1-(1-t)^2，精确等价）；
+//   退出：opacity→0 80ms delay 20（线性）；Y→20 150ms OutFluent(Middle)≈cubic-bezier(0.215,0.61,0.355,1.0)；
+//         旋转→6 150ms InFluent(Weak)=ease-in-quad；遮罩→透明 200ms delay 30 ease-out-quad。
+//   旋转中心 RenderTransformOrigin 0,0.5（左边缘中点）。
+//
+// 已知偏差：
+//   - Slint 无 LineHeight，正文行距为字体默认（≈1.2×15=18，与原版一致量级）。
+//   - 原版拖拽为整窗 DragMove（点按标题下划条附近）；此处由 MsgHost 暴露 request-drag
+//     回调，拖拽区域为标题+下划条条带，窗口移动由 Rust 侧实现（同主窗标题栏模式）。
+//   - 键盘焦点/回车确认未移植（原版 Btn1.Focus()）。
+//   - Markdown 为"按行块级"渲染（标题/列表/引用/代码块/分割线），不支持行内粗体/链接混排；
+//     解析在 Rust 侧完成，以 [MdLine] 模型传入。
+//   - 正文最大高度以宿主传入的 max-body-height 限高（原版取决于窗口高度）。
+//   - 选择弹窗行高取 30px（原版 MinHeight 24 的紧凑 MyListItem）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyButton, ButtonState } from "button.slint";
+import { MyListItem, ListItemType } from "list_item.slint";
+
+// 弹窗种类（None = 不显示）
+export enum MsgKind {
+    None,
+    Text,
+    Select,
+    Input,
+    Markdown,
+}
+
+// Markdown 行块类型（解析由 Rust 侧完成）
+export enum MdLineKind {
+    Paragraph,
+    Heading1,
+    Heading2,
+    Heading3,
+    Bullet,
+    Quote,
+    Code,
+    Separator,
+}
+
+export struct MdLine {
+    kind: MdLineKind,
+    text: string,
+}
+
+// ==========================================================================
+// 私有：对话框卡片基座（标题 + 下划条 + 内容槽 + 按钮行 + 进出动画）
+// ==========================================================================
+
+component MsgCardBase {
+    in property <string> title: "标题";
+    in property <bool> is-warn: false;
+    in property <string> btn1: "确定";
+    in property <string> btn2: "";
+    in property <string> btn3: "";
+    in property <bool> btn1-enabled: true;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> natural-width: 400px;   // 内容自然宽度（各弹窗测量后传入）
+
+    callback respond(int);        // 按钮序号 1/2/3
+    callback request-drag();      // 标题条带按下（请求拖动窗口）
+
+    // ---- 进入/退出动画（参数见文件头）----
+    property <bool> entered: false;
+    Timer {
+        interval: 20ms;
+        running: !root.entered;
+        triggered => { root.entered = true; }
+    }
+
+    property <float> op-in: root.entered ? 1 : 0;
+    animate op-in { duration: 120ms; delay: 60ms; }
+    property <float> op-out: root.closing ? 0 : 1;
+    animate op-out { duration: 80ms; delay: 20ms; }
+
+    property <length> y-in: root.entered ? 0px : 40px;
+    animate y-in { duration: 300ms; delay: 60ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+    property <length> y-out: root.closing ? 20px : 0px;
+    animate y-out { duration: 150ms; easing: cubic-bezier(0.215, 0.61, 0.355, 1.0); }
+
+    property <angle> r-in: root.entered ? 0deg : -4deg;
+    animate r-in { duration: 300ms; delay: 60ms; easing: ease-out-quad; }
+    property <angle> r-out: root.closing ? 6deg : 0deg;
+    animate r-out { duration: 150ms; easing: ease-in-quad; }
+
+    property <brush> title-color: root.is-warn ? GlobalTheme.red-light : GlobalTheme.color2;
+
+    // 按钮文本测量（宽 = 文字 + 24px 内边距）
+    m1 := Text { visible: false; text: root.btn1; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    m2 := Text { visible: false; text: root.btn2; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    m3 := Text { visible: false; text: root.btn3; font-size: GlobalTheme.font-size; font-family: GlobalTheme.font-family; }
+    property <length> b1w: m1.preferred-width + 24px;
+    out property <length> b1w-out: root.b1w;
+    property <length> b2w: m2.preferred-width + 24px;
+    out property <length> b2w-out: root.b2w;
+    property <length> b3w: m3.preferred-width + 24px;
+    out property <length> b3w-out: root.b3w;
+
+    width: min(root.max-dlg-width, max(400px, root.natural-width));
+    height: card-lay.preferred-height;
+
+    card := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 7px;
+        background: GlobalTheme.window-background;
+        drop-shadow-blur: 20px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: 2px;
+        drop-shadow-color: GlobalTheme.msgbox-shadow.with-alpha(0.8);   // 原版阴影 Opacity 0.8
+        opacity: root.op-in * root.op-out;
+        y: root.y-in + root.y-out;
+        transform-rotation: root.r-in + root.r-out;
+        transform-origin: { x: 0px, y: self.height / 2 };
+
+        // 吞掉卡片上的点击，防止穿透到遮罩
+        TouchArea { width: 100%; height: 100%; }
+
+        card-lay := VerticalLayout {
+            padding: 22px;
+            padding-bottom: 23px;
+
+            // ---- 标题（23px，Margin 7,-1,70,9）----
+            Rectangle {
+                preferred-height: title-t.preferred-height + 9px;
+                title-t := Text {
+                    x: 7px;
+                    y: 0px;
+                    width: parent.width - 77px;
+                    text: root.title;
+                    font-size: 23px;
+                    font-family: GlobalTheme.font-family;
+                    color: root.title-color;
+                    horizontal-alignment: left;
+                    vertical-alignment: top;
+                    overflow: elide;
+                    animate color { duration: 200ms; }
+                }
+            }
+
+            // ---- 标题下划条（高 2，与标题同色，通栏）----
+            Rectangle {
+                preferred-height: 2px;
+                background: root.title-color;
+                animate background { duration: 200ms; }
+            }
+
+            // ---- 间隔 13px ----
+            Rectangle { preferred-height: 13px; }
+
+            // ---- 内容槽（各弹窗注入）----
+            content-slot := Rectangle {
+                @children
+            }
+
+            // ---- 按钮行（右对齐，右留 8，间距 12，高 33）----
+            Rectangle {
+                preferred-height: 33px;
+
+                b3 := MyButton {
+                    x: parent.width - 8px - self.width;
+                    y: 0px;
+                    visible: root.btn3 != "";
+                    self-width: root.b3w;
+                    self-height: 33px;
+                    text: root.btn3;
+                    button-state: ButtonState.Normal;
+                    clicked => { root.respond(3); }
+                }
+                b2 := MyButton {
+                    x: (root.btn3 != "" ? b3.x - 12px : parent.width - 8px) - self.width;
+                    y: 0px;
+                    visible: root.btn2 != "";
+                    self-width: root.b2w;
+                    self-height: 33px;
+                    text: root.btn2;
+                    button-state: ButtonState.Normal;
+                    clicked => { root.respond(2); }
+                }
+                b1 := MyButton {
+                    x: (root.btn2 != "" ? b2.x - 12px : (root.btn3 != "" ? b3.x - 12px : parent.width - 8px)) - self.width;
+                    y: 0px;
+                    self-width: root.b1w;
+                    self-height: 33px;
+                    text: root.btn1;
+                    button-state: !root.btn1-enabled ? ButtonState.Disabled
+                        : root.is-warn ? ButtonState.Red
+                        : (root.btn2 != "" ? ButtonState.Highlighted : ButtonState.Normal);
+                    clicked => { root.respond(1); }
+                }
+            }
+        }
+
+        // ---- 拖拽条带（标题 + 下划条区域，原版 Drag 的近似）----
+        TouchArea {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 22px + title-t.preferred-height + 9px + 2px;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    root.request-drag();
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgText — 普通文本弹窗
+// ==========================================================================
+
+export component MyMsgText {
+    in property <string> title: "标题";
+    in property <string> caption: "";
+    in property <string> btn1: "确定";
+    in property <string> btn2: "";
+    in property <string> btn3: "";
+    in property <bool> is-warn: false;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 300px;
+    callback respond(int);
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    // 正文自然宽度测量（单行不换行）
+    cap-measure := Text { visible: false; text: root.caption; font-size: 15px; font-family: GlobalTheme.font-family; }
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    property <length> natural: max(400px,
+        cap-measure.preferred-width + 8px + 15px + 44px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + (root.btn3 != "" ? 12px + base.b3w-out : 0px) + 150px + 8px + 44px);
+
+    base := MsgCardBase {
+        title: root.title;
+        is-warn: root.is-warn;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn3: root.btn3;
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => { root.respond(i); }
+        request-drag => { root.request-drag(); }
+
+        // 正文（Padding 7,0,15,0；Margin 0,0,0,17；15px ColorBrush1 自动换行）
+        Rectangle {
+            preferred-height: Math.clamp(cap-text.preferred-height + 2px, 20px, root.max-body-height) + 17px;
+            clip: true;
+            cap-flick := Flickable {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height - 17px;
+                viewport-width: self.width;
+                viewport-height: cap-text.preferred-height + 2px;
+                cap-text := Text {
+                    x: 8px;
+                    y: 1px;
+                    width: cap-flick.width - 8px - 15px;
+                    text: root.caption;
+                    font-size: 15px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.color1;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgSelect — 选择弹窗（MyListItem RadioBox 列表）
+// ==========================================================================
+
+export component MyMsgSelect {
+    in property <string> title: "标题";
+    in property <[string]> options: [];
+    in property <string> btn1: "确定";
+    in property <string> btn2: "取消";
+    in property <bool> is-warn: false;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 280px;
+    in-out property <int> selected-index: -1;
+    callback respond(int);
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    property <length> natural: max(400px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + 150px + 8px + 44px);
+
+    base := MsgCardBase {
+        title: root.title;
+        is-warn: root.is-warn;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn1-enabled: root.selected-index >= 0;
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => { root.respond(i); }
+        request-drag => { root.request-drag(); }
+
+        // 选项列表（MyListItem RadioBox，行高 30 紧凑；Margin 0,0,0,17）
+        Rectangle {
+            preferred-height: Math.clamp(sel-lay.preferred-height, 30px, root.max-body-height) + 17px;
+            clip: true;
+            sel-flick := Flickable {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height - 17px;
+                viewport-width: self.width;
+                viewport-height: sel-lay.preferred-height;
+                sel-lay := VerticalLayout {
+                    width: sel-flick.width;
+                    for opt[i] in root.options: MyListItem {
+                        title: opt;
+                        item-type: ListItemType.RadioBox;
+                        item-height: 30px;
+                        checked: root.selected-index == i;
+                        clicked => { root.selected-index = i; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgInput — 输入弹窗（文本框 + 校验）
+// ==========================================================================
+
+export component MyMsgInput {
+    in property <string> title: "标题";
+    in property <string> caption: "";          // 说明文字（可为空，空则隐藏）
+    in property <string> btn1: "确定";
+    in property <string> btn2: "取消";
+    in property <bool> is-warn: false;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 200px;
+    in property <string> hint: "";             // 占位提示
+    in property <string> error: "";            // 校验错误（空 = 通过，由宿主 validate 计算）
+    in-out property <string> text: "";
+    callback respond(int);
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    cap-measure := Text { visible: false; text: root.caption; font-size: 15px; font-family: GlobalTheme.font-family; }
+    // 原版 TextArea MinWidth 450 → 对话框自然宽 ≈ 450+7+7+44
+    property <length> natural: max(508px,
+        cap-measure.preferred-width + 8px + 15px + 44px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + 150px + 8px + 44px);
+
+    base := MsgCardBase {
+        title: root.title;
+        is-warn: root.is-warn;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn1-enabled: root.error == "";
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => { root.respond(i); }
+        request-drag => { root.request-drag(); }
+
+        VerticalLayout {
+            // 说明文字（可选；Margin 0,0,0,7）
+            if root.caption != "" : Rectangle {
+                preferred-height: Math.clamp(cap-text.preferred-height + 2px, 18px, root.max-body-height) + 7px;
+                clip: true;
+                cap-flick := Flickable {
+                    x: 0px; y: 0px;
+                    width: parent.width;
+                    height: parent.height - 7px;
+                    viewport-width: self.width;
+                    viewport-height: cap-text.preferred-height + 2px;
+                    cap-text := Text {
+                        x: 8px;
+                        y: 1px;
+                        width: cap-flick.width - 8px - 15px;
+                        text: root.caption;
+                        font-size: 15px;
+                        font-family: GlobalTheme.font-family;
+                        color: GlobalTheme.color1;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // 输入框（28px 高、圆角 3、聚焦 color3 边、错误红边；Margin 7,0,7,12）
+            // err-t 恒存在（错误时可见），供下方高度测量引用；手工定位避免布局占位
+            Rectangle {
+                preferred-height: 28px + (root.error != "" ? err-t.preferred-height + 4px : 0px) + 12px;
+                box := Rectangle {
+                    x: 7px;
+                    y: 0px;
+                    width: parent.width - 14px;
+                    height: 28px;
+                    border-radius: 3px;
+                    border-width: 1px;
+                    border-color: root.error != "" ? GlobalTheme.red-light
+                        : (input.has-focus ? GlobalTheme.color3 : GlobalTheme.gray5);
+                    background: #ffffff;
+                    animate border-color { duration: 150ms; }
+                    input := TextInput {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: 100%;
+                        text <=> root.text;
+                        font-size: GlobalTheme.font-size;
+                        font-family: GlobalTheme.font-family;
+                        color: GlobalTheme.color1;
+                        vertical-alignment: center;
+                    }
+                    if root.text == "" : Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: 100%;
+                        text: root.hint;
+                        font-size: GlobalTheme.font-size;
+                        font-family: GlobalTheme.font-family;
+                        color: GlobalTheme.gray4;
+                        vertical-alignment: center;
+                    }
+                }
+                err-t := Text {
+                    x: 7px;
+                    y: 32px;
+                    width: parent.width - 14px;
+                    visible: root.error != "";
+                    text: root.error;
+                    font-size: 12px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.red-light;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyMsgMarkdown — Markdown 弹窗（块级渲染：标题/段落/列表/引用/代码/分割线）
+// ==========================================================================
+
+export component MyMsgMarkdown {
+    in property <string> title: "标题";
+    in property <[MdLine]> md-lines: [];
+    in property <string> btn1: "确定";
+    in property <string> btn2: "";
+    in property <string> btn3: "";
+    in property <bool> is-warn: false;
+    in property <bool> closing: false;
+    in property <length> max-dlg-width: 600px;
+    in property <length> max-body-height: 320px;
+    callback respond(int);
+    callback request-drag();
+
+    width: base.width;
+    height: base.height;
+
+    title-measure := Text { visible: false; text: root.title; font-size: 23px; font-family: GlobalTheme.font-family; }
+    // Markdown 内容偏宽，取 470 兜底（原版由内容测量撑开）
+    property <length> natural: max(470px,
+        title-measure.preferred-width + 77px + 44px,
+        base.b1w-out + (root.btn2 != "" ? 12px + base.b2w-out : 0px) + (root.btn3 != "" ? 12px + base.b3w-out : 0px) + 150px + 8px + 44px);
+
+    base := MsgCardBase {
+        title: root.title;
+        is-warn: root.is-warn;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn3: root.btn3;
+        closing: root.closing;
+        max-dlg-width: root.max-dlg-width;
+        natural-width: root.natural;
+        respond(i) => { root.respond(i); }
+        request-drag => { root.request-drag(); }
+
+        // Markdown 内容（Padding 0,0,7,0；Margin 0,0,0,17）
+        Rectangle {
+            preferred-height: Math.clamp(md-lay.preferred-height, 20px, root.max-body-height) + 17px;
+            clip: true;
+            md-flick := Flickable {
+                x: 0px; y: 0px;
+                width: parent.width;
+                height: parent.height - 17px;
+                viewport-width: self.width;
+                viewport-height: md-lay.preferred-height;
+                md-lay := VerticalLayout {
+                    width: md-flick.width - 7px;
+                    spacing: 6px;
+                    for line in root.md-lines: Rectangle {
+                        preferred-height: line.kind == MdLineKind.Separator ? 1px
+                            : md-t.preferred-height + (line.kind == MdLineKind.Code ? 12px : 0px);
+                        background: line.kind == MdLineKind.Code ? GlobalTheme.gray7 : transparent;
+                        border-radius: line.kind == MdLineKind.Code ? 3px : 0px;
+                        if line.kind == MdLineKind.Separator : Rectangle {
+                            y: 0px;
+                            width: 100%;
+                            height: 1px;
+                            background: GlobalTheme.gray5;
+                        }
+                        // md-t 恒存在（分割线时隐藏），供上方高度测量引用
+                        md-t := Text {
+                            visible: line.kind != MdLineKind.Separator;
+                            x: line.kind == MdLineKind.Code ? 6px : 0px;
+                            y: line.kind == MdLineKind.Code ? 6px : 0px;
+                            width: parent.width - (line.kind == MdLineKind.Code ? 12px : 0px);
+                            text: (line.kind == MdLineKind.Bullet ? "• " : "") + line.text;
+                            font-size: line.kind == MdLineKind.Heading1 ? 19px
+                                : line.kind == MdLineKind.Heading2 ? 16px
+                                : line.kind == MdLineKind.Heading3 ? 14px : 13px;
+                            font-weight: (line.kind == MdLineKind.Heading1 || line.kind == MdLineKind.Heading2
+                                || line.kind == MdLineKind.Heading3) ? 700 : 400;
+                            font-italic: line.kind == MdLineKind.Quote;
+                            font-family: line.kind == MdLineKind.Code ? "Consolas" : GlobalTheme.font-family;
+                            color: line.kind == MdLineKind.Quote ? GlobalTheme.gray2 : GlobalTheme.color1;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MsgHost — 对话框宿主（全窗遮罩 + 居中卡片 + 进出动画编排）
+// 用法：设置 title/caption/... 后将 kind 置为对应类型即弹出；
+//       按钮点击触发 respond(i)，auto-close 时自动播放退出动画，
+//       退出结束后触发 closed()（宿主应将 kind 置回 None）。
+// ==========================================================================
+
+export component MsgHost {
+    in property <MsgKind> kind: MsgKind.None;
+    in property <string> title: "";
+    in property <string> caption: "";
+    in property <[MdLine]> md-lines: [];
+    in property <[string]> options: [];
+    in property <string> btn1: "确定";
+    in property <string> btn2: "";
+    in property <string> btn3: "";
+    in property <bool> is-warn: false;
+    in property <bool> auto-close: true;
+    in property <string> input-hint: "";
+    in-out property <int> selected-index: -1;
+    in-out property <string> input-text: "";
+
+    pure callback validate(string) -> string;   // 输入校验：返回错误文本（空 = 通过）
+    callback respond(int);                      // 按钮序号 1/2/3（Input/Select 读取 input-text / selected-index）
+    callback closed();                          // 退出动画播放完毕
+    callback request-drag();                    // 请求拖动窗口（由主窗/Rust 实现）
+
+    property <bool> closing: false;
+    property <bool> close-fired: false;
+    property <string> input-error: root.validate(root.input-text);
+
+    public function close() {
+        if root.kind != MsgKind.None && !root.closing {
+            root.closing = true;
+        }
+    }
+
+    changed kind => {
+        root.closing = false;
+        root.close-fired = false;
+        root.entered = false;
+    }
+
+    function on-respond(i: int) {
+        root.respond(i);
+        if root.auto-close {
+            root.close();
+        }
+    }
+
+    // 退出动画总时长 ≈ 230ms，250ms 后通知宿主移除
+    close-timer := Timer {
+        interval: 250ms;
+        running: root.closing && !root.close-fired;
+        triggered => {
+            root.close-fired = true;
+            root.closed();
+        }
+    }
+
+    // 遮罩进入/退出（进入 200ms 线性；退出 200ms delay 30 ease-out-quad）
+    property <bool> entered: false;
+    Timer {
+        interval: 20ms;
+        running: root.kind != MsgKind.None && !root.entered;
+        triggered => { root.entered = true; }
+    }
+    property <float> ov-in: root.entered ? 1 : 0;
+    animate ov-in { duration: 200ms; }
+    property <float> ov-out: root.closing ? 0 : 1;
+    animate ov-out { duration: 200ms; delay: 30ms; easing: ease-out-quad; }
+
+    visible: root.kind != MsgKind.None;
+
+    // 遮罩（普通 #5A000000；警告 #8C500000）
+    overlay := Rectangle {
+        width: 100%;
+        height: 100%;
+        background: root.is-warn ? #8C500000 : #5A000000;
+        opacity: root.ov-in * root.ov-out;
+        TouchArea { width: 100%; height: 100%; }   // 模态：吞掉遮罩点击
+    }
+
+    // 居中对话框（窗口 Margin 25 → 最大宽高各减 50）
+    if root.kind == MsgKind.Text : MyMsgText {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: root.title;
+        caption: root.caption;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn3: root.btn3;
+        is-warn: root.is-warn;
+        closing: root.closing;
+        max-dlg-width: root.width - 50px;
+        max-body-height: max(80px, root.height - 50px - 150px);
+        respond(i) => { root.on-respond(i); }
+        request-drag => { root.request-drag(); }
+    }
+    if root.kind == MsgKind.Select : MyMsgSelect {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: root.title;
+        options: root.options;
+        btn1: root.btn1;
+        btn2: root.btn2 == "" ? "取消" : root.btn2;
+        is-warn: root.is-warn;
+        closing: root.closing;
+        max-dlg-width: root.width - 50px;
+        max-body-height: max(60px, root.height - 50px - 150px);
+        selected-index <=> root.selected-index;
+        respond(i) => { root.on-respond(i); }
+        request-drag => { root.request-drag(); }
+    }
+    if root.kind == MsgKind.Input : MyMsgInput {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: root.title;
+        caption: root.caption;
+        btn1: root.btn1;
+        btn2: root.btn2 == "" ? "取消" : root.btn2;
+        is-warn: root.is-warn;
+        closing: root.closing;
+        max-dlg-width: root.width - 50px;
+        max-body-height: max(60px, root.height - 50px - 210px);
+        hint: root.input-hint;
+        error: root.input-error;
+        text <=> root.input-text;
+        respond(i) => { root.on-respond(i); }
+        request-drag => { root.request-drag(); }
+    }
+    if root.kind == MsgKind.Markdown : MyMsgMarkdown {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        title: root.title;
+        md-lines: root.md-lines;
+        btn1: root.btn1;
+        btn2: root.btn2;
+        btn3: root.btn3;
+        is-warn: root.is-warn;
+        closing: root.closing;
+        max-dlg-width: root.width - 50px;
+        max-body-height: max(80px, root.height - 50px - 150px);
+        respond(i) => { root.on-respond(i); }
+        request-drag => { root.request-drag(); }
+    }
+}

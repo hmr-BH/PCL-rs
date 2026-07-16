@@ -1,0 +1,367 @@
+// PCL-rs 本地 Mod 列表项 — 1:1 移植 PCL-CE MyLocalCompItem
+//   原版文件：Pages/PageInstance/MyLocalModItem.xaml + .xaml.cs
+//             （按钮装配见 Pages/PageInstance/PageInstanceCompResource.xaml.cs 约 630~683 行）
+//
+// 结构（原版 Grid，高 44，Background=ColorBrushSemiTransparent）：
+//   列：6 | 34(Logo) | 7 | Auto(标题/Tag) | 1*(描述) | 4(右缩进列，悬停展开 5+N*25)
+//   行：1* | 20(标题) | 18(Tag/描述) | 1*  → 上下留白各 3px
+//   Logo 34×34 圆角 6 裁切，位于 (6, 5)；状态角标 20×20 位于 Logo 右下 (25, 24)
+//     （原版 Icons/{Disabled|Unavailable}.png，此处以 lucide 近似，见偏差说明）；
+//   标题 14px + 副标题 12px Gray1 opacity 0.4（原版 PanTitle 三级压缩：先压副标题再压标题，
+//     此处由"标题优先、副标题吃剩余宽度、两者各自省略"等效）；
+//   可更新时标题旁 21×21 lucide/upload（Black 主题、Opacity 0.4、Margin -2,-1.6,0,0）；
+//   Tag chips：底 #0C000000、前景 #58888888、11px、Padding 3,1、圆角 3、右间距 3；
+//   描述 LabInfo：12px Gray4(#a6a6a6)，字符省略。
+//
+// 状态视觉：
+//   Fine 正常；Disabled 标题删除线 + 灰色；Unavailable 删除线 + " [错误]" 后缀（原版 ErrorSuffix）；
+//   标题前景：勾选 ? (Fine ? ColorBrush2 : ColorBrush5) : (Fine ? ColorBrush1 : Gray4)，
+//   勾选 200ms / 取消 120ms；
+//   勾选条 RectCheck：宽 5、高 0↔32、圆角 2、ColorBrush3、x=-3 垂直居中，
+//   勾选 300ms OutBack(Weak) 展开 + 30ms 淡入，取消 120ms 缩回 + 70ms(delay 40) 淡出（见偏差说明）；
+//   悬停底 RectBack（圆角 3、1px ColorBrush6 边）：悬停**或勾选**时显示，
+//   悬停 ColorBrushBg1 / 按下 ColorBrush6，120ms 进 180ms 出，scale 0.996↔1。
+//
+// 交互：
+//   左键 clicked() —— 只抛事件，勾选由宿主置 checked（对应原版页面 Click 里 ss.Checked = !ss.Checked）；
+//   右键 right-clicked(x, y)（原版资源页右键 = 详情）；
+//   悬停按钮（25×25）：详情 info / 打开文件位置 folder-open / 启禁用切换 circle-minus↔circle-check
+//     （仅 Mod 且状态非 Unavailable 时显示）/ 删除 trash-2，淡入 84ms(delay 36ms) 淡出 72ms，
+//     右缩进列 4 → 5+N*25（36ms delay 84ms / 72ms 回）；
+//   更新按钮 update-clicked() / update-right-clicked()（原版右键 = 查看更新日志）。
+//
+// 实现说明（事件分层）：与 MyCompItem 相同，采用"单一顶层 TouchArea + 坐标命中判定"，
+//   按钮为纯视觉 ItemHoverButton（从 comp_item.slint 导入）；原版也在按下时
+//   buttonStack.IsHitTestVisible=false，与此方案行为一致。
+//
+// 已知偏差：
+//   - 状态角标：原版为 Icons/Disabled.png、Icons/Unavailable.png 位图；
+//     此处近似为 lucide/circle-minus（Gray3）与 lucide/triangle-alert（RedLight），无边框白底。
+//   - 标题删除线：Slint Text 无 TextDecorations，用 1px 横线矩形近似（宽度取标题渲染宽）。
+//   - 滑动多选（SwipeSelect）：依赖父容器枚举兄弟项，Slint 侧由宿主页面实现，本组件仅暴露 checked。
+//   - RectCheck 勾选用单段 300ms OutBack（原版为 200ms OutFluent(40%) + 300ms OutBack(60%) 两段）；
+//     初始勾选的全高拉伸形态（Stretch + Margin 6）统一为中心 32px。
+//   - 标题三级压缩为近似等效（见上）；Logo 由 data.icon 传入，无图标时显示 color8 底。
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { CompTagData, CompTagColor, ItemHoverButton } from "comp_item.slint";
+
+// 本地文件状态（原版 ModLocalComp.LocalCompFile.LocalFileStatus）
+export enum LocalModState {
+    Fine,
+    Disabled,
+    Unavailable,
+}
+
+// MyLocalModItem 数据模型（显示文本由宿主按原版 Refresh() 逻辑拼接）
+export struct LocalModItemData {
+    icon: image,            // Mod 图标（34×34 显示，圆角 6 裁切）
+    title: string,          // 标题（译名或文件名，按 UiCompNameSolution 配置）
+    version: string,        // 副标题槽位（原版 SubTitle，如 "  |  1.20.1"），空则隐藏
+    description: string,    // 描述（文件名/译名/简介拼接，已去除换行）
+    tags: [CompTagData],    // Tag chips（Comp.Tags 或 ["文件夹"]）
+    state: LocalModState,   // 启用/禁用/错误
+    can-update: bool,       // 是否显示更新按钮（原版 Entry.CanUpdate）
+}
+
+export component MyLocalModItem inherits Rectangle {
+    in property <LocalModItemData> data;
+    in-out property <bool> checked: false;          // 勾选（批量操作），由宿主切换
+    in property <bool> enabled: true;
+    in property <bool> show-toggle-btn: true;       // 启禁用按钮（非 Mod 资源类型宿主置 false）
+
+    callback clicked();                             // 左键点击（原版仅抛 Click，勾选由宿主处理）
+    callback right-clicked(length, length);         // 右键抬起（坐标相对于本项；原版 = 详情）
+    callback changed(bool);                         // checked 变化（原版 Changed 事件）
+    callback info-clicked();                        // 详情（lucide/info）
+    callback open-clicked();                        // 打开文件位置（lucide/folder-open）
+    callback toggle-enabled-clicked();              // 启用/禁用切换（lucide/circle-minus ↔ circle-check）
+    callback delete-clicked();                      // 删除（lucide/trash-2）
+    callback update-clicked();                      // 更新按钮（原版弹确认框）
+    callback update-right-clicked();                // 更新按钮右键（原版 = 查看更新日志）
+
+    property <bool> _fine: root.data.state == LocalModState.Fine;
+    // 启禁用按钮可见性（原版：仅 Mod 且状态非 Unavailable）
+    property <bool> _ed-visible: root.show-toggle-btn && root.data.state != LocalModState.Unavailable;
+    property <int> _btn-count: 3 + (root._ed-visible ? 1 : 0);
+
+    // ---- 右缩进列：4 → 悬停 5+N*25（36ms delay 84ms 进 / 72ms 出）----
+    property <length> _pad-right: touch.has-hover ? 5px + root._btn-count * 25px : 4px;
+    animate _pad-right { duration: touch.has-hover ? 36ms : 72ms; delay: touch.has-hover ? 84ms : 0ms; }
+
+    // ---- 标题前景：勾选 ? (Fine?ColorBrush2:ColorBrush5) : (Fine?ColorBrush1:Gray4) ----
+    property <brush> title-fg: root.checked
+        ? (root._fine ? GlobalTheme.color2 : GlobalTheme.color5)
+        : (root._fine ? GlobalTheme.color1 : GlobalTheme.gray4);
+
+    height: 44px;
+    background: GlobalTheme.color-semi-transparent;
+
+    changed checked => { root.changed(root.checked); }
+
+    // ---- 按钮区坐标与命中判定：0 无 / 1 详情 / 2 打开位置 / 3 启禁用 / 4 删除 / 5 更新 ----
+    property <length> _btn-w: root._btn-count * 25px;
+    property <length> _btn-x: root.width - root._btn-w - 5px;
+    property <length> _btn-y: (root.height - 25px) / 2;
+    function btn-at(px: length, py: length) -> int {
+        // 更新按钮（常显，位于标题旁）
+        if root.data.can-update
+            && px >= upd-btn.x + 47px && px <= upd-btn.x + 47px + 21px
+            && py >= upd-btn.y + 3px && py <= upd-btn.y + 3px + 21px {
+            return 5;
+        }
+        if py >= root._btn-y && py <= root._btn-y + 25px && px >= root._btn-x {
+            if px < root._btn-x + 25px { return 1; }
+            if px < root._btn-x + 50px { return 2; }
+            if root._ed-visible {
+                if px < root._btn-x + 75px { return 3; }
+                if px < root._btn-x + 100px { return 4; }
+            } else {
+                if px < root._btn-x + 75px { return 4; }
+            }
+        }
+        return 0;
+    }
+    property <int> _hbtn: touch.has-hover ? root.btn-at(touch.mouse-x, touch.mouse-y) : 0;
+    property <int> _pbtn: 0;
+    property <bool> _main-pressed: touch.pressed && root._pbtn == 0;
+
+    // ---- 悬停底 RectBack（圆角 3、1px ColorBrush6 边；悬停或勾选时显示）----
+    rect-back := Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: GlobalTheme.color6;
+        background: root._main-pressed ? GlobalTheme.color6
+                  : (touch.has-hover || root.checked) ? GlobalTheme.color-bg1 : GlobalTheme.color7;
+        opacity: touch.has-hover || root.checked ? 1 : 0;
+        transform-scale: root._main-pressed ? 0.996 : (touch.has-hover || root.checked ? 1.0 : 0.996);
+        animate background { duration: touch.has-hover ? 120ms : 180ms; }
+        animate opacity { duration: touch.has-hover ? 120ms : 180ms; easing: ease-out; }
+        animate transform-scale { duration: 150ms; easing: ease-out; }
+    }
+
+    // ---- 勾选条 RectCheck（宽 5、高 0↔32、圆角 2、ColorBrush3、x=-3 垂直居中）----
+    rect-check := Rectangle {
+        x: -3px;
+        y: (root.height - self.height) / 2;
+        width: 5px;
+        height: root.checked ? 32px : 0px;
+        border-radius: 2px;
+        background: GlobalTheme.color3;
+        opacity: root.checked ? 1 : 0;
+        // 勾选：300ms OutBack(Weak) 展开 + 30ms 淡入；取消：120ms 缩回 + 70ms(delay 40) 淡出
+        animate height { duration: 300ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+        animate opacity { duration: root.checked ? 30ms : 70ms; delay: root.checked ? 0ms : 40ms; }
+    }
+
+    // ---- Logo（34×34 @ (6, 5)，圆角 6 裁切）----
+    logo-clip := Rectangle {
+        x: 6px; y: 5px;
+        width: 34px; height: 34px;
+        border-radius: 6px;
+        clip: true;
+        background: GlobalTheme.color8;     // 无图标期兜底底色（原版为 NoIcon.png）
+        Image {
+            width: 100%; height: 100%;
+            source: root.data.icon;
+            image-fit: contain;
+        }
+    }
+
+    // ---- 状态角标（20×20 @ (25, 24)，Logo 右下，仅状态非 Fine 时显示）----
+    if !root._fine : Image {
+        x: 25px; y: 24px;
+        width: 20px; height: 20px;
+        source: root.data.state == LocalModState.Disabled
+            ? @image-url("../assets/icons/lucide/circle-minus.svg")
+            : @image-url("../assets/icons/lucide/triangle-alert.svg");
+        colorize: root.data.state == LocalModState.Disabled
+            ? GlobalTheme.gray3 : GlobalTheme.red-light;
+        image-fit: contain;
+    }
+
+    // ---- 标题行（行 1，高 20）：标题 14px + 副标题 12px Gray1 opacity 0.4 + 更新按钮 ----
+    title-box := Rectangle {
+        x: 47px; y: 3px;
+        width: parent.width - 47px - root._pad-right;
+        height: 20px;
+        title-txt := Text {
+            x: 0; y: 0; height: 100%;
+            width: min(self.preferred-width, parent.width);
+            // Unavailable 追加 " [错误]" 后缀（原版 Instance.Resource.Item.ErrorSuffix）
+            text: root.data.title + (root.data.state == LocalModState.Unavailable ? " [错误]" : "");
+            font-size: 14px;
+            font-family: GlobalTheme.font-family;
+            color: root.title-fg;
+            vertical-alignment: center;
+            overflow: elide;
+            animate color { duration: root.checked ? 200ms : 120ms; }
+        }
+        // 删除线（Disabled/Unavailable；Slint 无 TextDecorations，以 1px 横线近似）
+        strike := Rectangle {
+            x: 0; y: (parent.height - 1px) / 2 + 1px;
+            width: min(title-txt.preferred-width, title-txt.width);
+            height: 1px;
+            background: root.title-fg;
+            visible: !root._fine;
+            animate background { duration: root.checked ? 200ms : 120ms; }
+        }
+        sub-txt := Text {
+            x: title-txt.width; y: 0; height: 100%;
+            // 副标题吃剩余宽度（对应原版压缩等级 1）；为更新按钮预留 19px
+            width: min(self.preferred-width, max(0px, parent.width - title-txt.width
+                - (root.data.can-update ? 19px : 0px)));
+            text: root.data.version;
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: GlobalTheme.gray1;
+            opacity: 0.4;
+            vertical-alignment: center;
+            overflow: elide;
+            visible: root.data.version != "";
+        }
+        // 更新按钮（21×21，Margin -2,-1.6,0,0，Black 主题 + Opacity 0.4，仅 CanUpdate 时显示）
+        upd-btn := ItemHoverButton {
+            x: sub-txt.x + sub-txt.width - 2px;
+            y: -2px;
+            size: 21px;
+            visible: root.data.can-update;
+            icon: @image-url("../assets/icons/lucide/upload.svg");
+            icon-opacity: 0.4;
+            normal-color: #a0000000;      // MyIconButton Black 主题
+            hover-color: #e6000000;
+            hovered: root._hbtn == 5;
+            pressed: root._pbtn == 5 && touch.pressed;
+        }
+    }
+
+    // ---- Tag 与描述行（行 2，高 18）：chips（x=46）+ 描述 12px Gray4 ----
+    tag-row := HorizontalLayout {
+        x: 46px; y: 23px;
+        width: parent.width - 46px - root._pad-right;
+        height: 18px;
+        spacing: 0;
+
+        // 无标签时补 1px（原版描述从 col4 起点 47 开始）
+        if root.data.tags.length == 0 : Rectangle { width: 1px; }
+
+        for tag in root.data.tags : Rectangle {
+            width: chip-txt.preferred-width + 6px + 3px;
+            height: 100%;
+            chip-bg := Rectangle {
+                x: 0; y: (parent.height - self.height) / 2;
+                width: parent.width - 3px;
+                height: chip-txt.preferred-height + 2px;
+                border-radius: 3px;
+                background: tag.color == CompTagColor.Blue ? #0c1370f3
+                          : tag.color == CompTagColor.Red ? #0cf42b3c
+                          : tag.color == CompTagColor.Yellow ? #0cc1840a
+                          : tag.color == CompTagColor.Green ? #0c27ae60
+                          : #0c000000;    // 原版 Color.FromArgb(12, 0, 0, 0)
+                chip-txt := Text {
+                    x: 3px; y: 1px;
+                    text: tag.text;
+                    font-size: 11px;
+                    font-family: GlobalTheme.font-family;
+                    color: tag.color == CompTagColor.Blue ? #581370f3
+                         : tag.color == CompTagColor.Red ? #58f42b3c
+                         : tag.color == CompTagColor.Yellow ? #58c1840a
+                         : tag.color == CompTagColor.Green ? #5827ae60
+                         : #58888888;    // 原版 Color.FromArgb(88, 136, 136, 136)
+                }
+            }
+        }
+
+        // 描述（LabInfo）：12px Gray4，字符省略，占满剩余宽度
+        info-wrap := Rectangle {
+            horizontal-stretch: 1;
+            height: 100%;
+            clip: true;
+            info-txt := Text {
+                x: 0; y: 0;
+                width: 100%; height: 100%;
+                text: root.data.description;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray4;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // ---- 右侧按钮列（右对齐垂直居中，右边距 5，悬停淡入；纯视觉，点击由 touch 坐标判定）----
+    buttons := Rectangle {
+        x: root._btn-x; y: root._btn-y;
+        width: root._btn-w; height: 25px;
+        opacity: touch.has-hover ? 1 : 0;
+        // 淡入 84ms(delay 36ms)，淡出 72ms（原版 time*0.7/delay time*0.3、time*0.4）
+        animate opacity { duration: touch.has-hover ? 84ms : 72ms; delay: touch.has-hover ? 36ms : 0ms; }
+
+        ItemHoverButton {   // 详情
+            x: 0; y: 0;
+            icon: @image-url("../assets/icons/lucide/info.svg");
+            hovered: root._hbtn == 1;
+            pressed: root._pbtn == 1 && touch.pressed;
+        }
+        ItemHoverButton {   // 打开文件位置
+            x: 25px; y: 0;
+            icon: @image-url("../assets/icons/lucide/folder-open.svg");
+            hovered: root._hbtn == 2;
+            pressed: root._pbtn == 2 && touch.pressed;
+        }
+        if root._ed-visible : ItemHoverButton {   // 启用/禁用切换
+            x: 50px; y: 0;
+            icon: root._fine
+                ? @image-url("../assets/icons/lucide/circle-minus.svg")
+                : @image-url("../assets/icons/lucide/circle-check.svg");
+            hovered: root._hbtn == 3;
+            pressed: root._pbtn == 3 && touch.pressed;
+        }
+        ItemHoverButton {   // 删除
+            x: root._ed-visible ? 75px : 50px; y: 0;
+            icon: @image-url("../assets/icons/lucide/trash-2.svg");
+            hovered: root._hbtn == 4;
+            pressed: root._pbtn == 4 && touch.pressed;
+        }
+    }
+
+    // ---- 交互（最上层单一 TouchArea + 坐标命中判定）----
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => {
+            if root.btn-at(self.mouse-x, self.mouse-y) == 1 {
+                if touch.has-hover { root.info-clicked(); }
+            } else if root.btn-at(self.mouse-x, self.mouse-y) == 2 {
+                if touch.has-hover { root.open-clicked(); }
+            } else if root.btn-at(self.mouse-x, self.mouse-y) == 3 {
+                if touch.has-hover { root.toggle-enabled-clicked(); }
+            } else if root.btn-at(self.mouse-x, self.mouse-y) == 4 {
+                if touch.has-hover { root.delete-clicked(); }
+            } else if root.btn-at(self.mouse-x, self.mouse-y) == 5 {
+                root.update-clicked();      // 更新按钮常显，无需悬停守卫
+            } else {
+                root.clicked();
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root._pbtn = root.btn-at(self.mouse-x, self.mouse-y);
+            }
+            if e.kind == PointerEventKind.up {
+                if e.button == PointerEventButton.left { root._pbtn = 0; }
+                if e.button == PointerEventButton.right {
+                    if root.btn-at(self.mouse-x, self.mouse-y) == 5 {
+                        root.update-right-clicked();    // 原版右键更新按钮 = 查看更新日志
+                    } else {
+                        root.right-clicked(self.mouse-x, self.mouse-y);
+                    }
+                }
+            }
+            if e.kind == PointerEventKind.cancel { root._pbtn = 0; }
+        }
+    }
+}

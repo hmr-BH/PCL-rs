@@ -1,0 +1,351 @@
+// ==========================================================================
+// PCL-rs 小部件：实例服务器卡片 ServerCard — 1:1 移植
+// 原版文件：
+//   Pages/PageInstance/ServerCard.xaml + .xaml.cs
+//   Pages/PageInstance/PageInstanceServer.xaml（使用处，服务器列表 PanServers）
+//
+// 结构（原版 MyCard 无标题 + PanBack Grid 高 44，背景 ColorBrushSemiTransparent）：
+//   列：6 | 34 | 7 | * | 350 | 60；行：1* | 17 | 18 | 1*（44px → 两端各 4.5）。
+//   图标：列1 跨行1-2，34×34，右对齐垂直居中，圆角 6 裁剪，HighQuality。
+//   名称：列3 行1，底对齐，14px，省略号，MaxWidth 180。
+//   信号+人数：列3 行2 底对齐横向排列；信号图标 20×20；
+//     人数 12px ColorBrushGray3(#8c8c8c) Opacity 0.4 垂直居中。
+//   MOTD：列4 跨行1-2，Margin 0,0,3,1，350×34 居中（最多 2 行 12px，白底色表）；
+//     或纯文本 ServerMotD（12px ColorBrushGray4 #a6a6a6 居中省略号）。
+//   按钮：列5 跨行1-2 垂直居中右距 4：MyIconButton play(24) + settings(24, LogoScale 1.2)。
+//
+// 状态（原版 UpdateServerUi）：
+//   Online：信号格按 ping 分档，人数 "{on} / {max}"（default 则 "???"），MOTD 渲染；
+//   Pinging：三点加载图标，人数"正在连接"，ServerMotD"正在连接..."；
+//   Offline：离线图标（X+信号条），人数"离线"，ServerMotD"服务器离线"。
+// ping 分档（原版 GetSignalIcon）：0-99→5 格；100-299→4；300-599→3；600-999→2；否则→1。
+// 信号格几何（1024 viewbox，5 条竖条底边 y=737.6，激活 #00ff21 未激活 #888888）：
+//   x=234.667/353.067/471.445/589.867/708.267，宽≈80.85，
+//   高=127.04/196.373/277.227/358.08/438.933。
+// 右键菜单（原版 settings 按钮 ContextMenu）：刷新 / 复制地址 / 编辑 / 移除。
+//
+// 已知偏差：
+//   1. 菜单项图标用 lucide 等价物（refresh-cw/copy/pencil/trash-2）替代原版 WPF path；
+//      菜单分隔线 Separator 未实现（menu.slint 无分隔线能力）。
+//   2. 离线图标取原版 signal_offline 的 path 数据（1280×1024 viewbox）原样绘制，
+//      加载三点以同心圆环近似（原版为 FillRule=Nonzero 的双圆相减 path，视觉等价）。
+//   3. 原版 ToolTip（信号悬停显示 "Nms"、名称全文）未实现（Slint 无 ToolTip）。
+//   4. MOTD § 分段着色由 Rust 解析为整行单色传入（白底色表，默认 #888888）。
+//   5. MyCard 标题为空时仍占用标题区？——原版 Title="" 的 TextBlock 不占地，
+//      卡片高 = PanBack 44px，本组件即 44px；卡片间距 Margin 0,8 由宿主列表负责。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+import { MyMenu, MyMenuItemData } from "../components/menu.slint";
+
+// 服务器状态（原版 MinecraftServerInfo.ServerStatus）
+export enum McServerStatus { Online, Pinging, Offline }
+
+// 信号图标种类（原版 IconManager 的 signal_1..5 / signal_offline / loading）
+export enum McSignalKind { Level1, Level2, Level3, Level4, Level5, Offline, Loading }
+
+// 原版 GetSignalIcon 分档
+export pure function mc-signal-level(ping: int) -> McSignalKind {
+    return ping >= 0 && ping <= 99 ? McSignalKind.Level5
+        : ping >= 100 && ping <= 299 ? McSignalKind.Level4
+        : ping >= 300 && ping <= 599 ? McSignalKind.Level3
+        : ping >= 600 && ping <= 999 ? McSignalKind.Level2
+        : McSignalKind.Level1;
+}
+
+// 服务器卡片数据模型（Rust 侧 ping 结果填充，无假数据）
+export struct ServerCardData {
+    icon: image,                 // 服务器图标
+    has-icon: bool,
+    name: string,                // 服务器名称
+    motd-line1: string,          // MOTD 第一行（§ 已由 Rust 剥离）
+    motd-line2: string,
+    motd-line1-color: brush,     // 行色（Rust 按白底色表解析，默认 #888888）
+    motd-line2-color: brush,
+    players-online: int,         // 在线人数（0=未知 → "???"）
+    players-max: int,            // 最大人数
+    ping: int,                   // 延迟 ms
+    status: McServerStatus,
+}
+
+// ==========================================================================
+// 私有：McSignalIcon — 20×20 信号格 / 离线 / 加载图标
+// ==========================================================================
+component McSignalIcon inherits Rectangle {
+    in property <McSignalKind> kind: McSignalKind.Level5;
+
+    // 1024 viewbox → 20px 换算单位
+    property <length> u: 20px / 1024;
+    // 激活格数（Offline/Loading 时为 0）
+    property <int> lvl: root.kind == McSignalKind.Level1 ? 1
+        : root.kind == McSignalKind.Level2 ? 2
+        : root.kind == McSignalKind.Level3 ? 3
+        : root.kind == McSignalKind.Level4 ? 4
+        : root.kind == McSignalKind.Level5 ? 5 : 0;
+
+    // ---- 5 格信号（signal_1..5：底边 737.6，激活 #00ff21 / 未激活 #888888）----
+    if root.lvl > 0 : Rectangle {
+        width: 100%;
+        height: 100%;
+        Rectangle { x: 234.667 * root.u; width: 80.853 * root.u; height: 127.04 * root.u;
+            y: 737.6 * root.u - self.height; border-radius: 0.4px;
+            background: root.lvl >= 1 ? #00ff21 : #888888; }
+        Rectangle { x: 353.067 * root.u; width: 80.853 * root.u; height: 196.373 * root.u;
+            y: 737.6 * root.u - self.height; border-radius: 0.4px;
+            background: root.lvl >= 2 ? #00ff21 : #888888; }
+        Rectangle { x: 471.445 * root.u; width: 80.896 * root.u; height: 277.227 * root.u;
+            y: 737.6 * root.u - self.height; border-radius: 0.4px;
+            background: root.lvl >= 3 ? #00ff21 : #888888; }
+        Rectangle { x: 589.867 * root.u; width: 80.853 * root.u; height: 358.08 * root.u;
+            y: 737.6 * root.u - self.height; border-radius: 0.4px;
+            background: root.lvl >= 4 ? #00ff21 : #888888; }
+        Rectangle { x: 708.267 * root.u; width: 80.853 * root.u; height: 438.933 * root.u;
+            y: 737.6 * root.u - self.height; border-radius: 0.4px;
+            background: root.lvl >= 5 ? #00ff21 : #888888; }
+    }
+
+    // ---- 离线（signal_offline，原版 path 原样，1280×1024 viewbox，14×14 居中）----
+    if root.kind == McSignalKind.Offline : Path {
+        x: 3px;
+        y: 3px;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 1280;
+        viewbox-height: 1024;
+        fill: #000000;
+        commands: "M 317.63 349.235 l -67.951 -67.951 l -67.95 67.95 c -18.964 18.964 -48.988 18.964 -67.951 0 c -18.963 -18.962 -18.963 -48.987 0 -67.95 l 67.95 -67.95 l -66.37 -67.951 c -18.963 -18.963 -18.963 -48.988 0 -67.95 c 18.963 -18.964 48.988 -18.964 67.95 0 l 67.951 67.95 l 67.95 -67.95 c 18.964 -18.964 48.989 -18.964 67.951 0 c 18.963 18.962 18.963 48.987 0 67.95 l -67.95 67.95 l 67.95 67.951 c 18.963 18.963 18.963 48.988 0 67.95 c -9.481 9.482 -20.543 14.223 -33.185 14.223 c -14.222 0 -26.864 -6.321 -36.345 -14.222 z M 216.494 752.198 h -48.988 c -26.864 0 -48.987 26.864 -48.987 60.049 v 120.099 c 0 33.185 22.123 60.05 48.987 60.05 h 48.988 c 26.864 0 48.987 -26.865 48.987 -60.05 v -120.1 c 0 -33.184 -22.123 -60.048 -48.987 -60.048 z M 516.74 512 h -48.988 c -26.864 0 -48.988 26.864 -48.988 60.05 v 360.296 c 0 33.185 22.124 60.05 48.988 60.05 h 48.988 c 26.864 0 48.987 -26.865 48.987 -60.05 V 572.049 c 0 -33.185 -22.123 -60.049 -48.987 -60.049 z m 300.247 -240.198 H 768 c -26.864 0 -48.988 26.865 -48.988 60.05 v 600.494 c 0 33.185 22.124 60.05 48.988 60.05 h 48.988 c 26.864 0 48.987 -26.865 48.987 -60.05 V 331.852 c 0 -33.185 -22.123 -60.05 -48.987 -60.05 z m 300.247 -240.197 h -48.988 c -26.864 0 -48.988 26.864 -48.988 60.05 v 840.69 c 0 33.186 22.124 60.05 48.988 60.05 h 48.988 c 26.864 0 48.987 -26.864 48.987 -60.05 V 91.656 c -1.58 -33.186 -22.123 -60.05 -48.987 -60.05 z";
+    }
+
+    // ---- 加载中（loading，三点圆环：外径 128/213.3/128，环厚 42.667，见偏差 2）----
+    if root.kind == McSignalKind.Loading : Rectangle {
+        width: 100%;
+        height: 100%;
+        // 左点（外半径 64，中心 (192, 490.667)）
+        Rectangle {
+            x: (192 - 64) * root.u;
+            y: (490.667 - 64) * root.u;
+            width: 128 * root.u;
+            height: 128 * root.u;
+            border-radius: 64 * root.u;
+            border-width: 42.667 * root.u;
+            border-color: #000000;
+        }
+        // 中点（外半径 106.667，中心 (490.667, 490.667)）
+        Rectangle {
+            x: (490.667 - 106.667) * root.u;
+            y: (490.667 - 106.667) * root.u;
+            width: 213.334 * root.u;
+            height: 213.334 * root.u;
+            border-radius: 106.667 * root.u;
+            border-width: 42.667 * root.u;
+            border-color: #000000;
+        }
+        // 右点（外半径 64，中心 (789.333, 490.667)）
+        Rectangle {
+            x: (789.333 - 64) * root.u;
+            y: (490.667 - 64) * root.u;
+            width: 128 * root.u;
+            height: 128 * root.u;
+            border-radius: 64 * root.u;
+            border-width: 42.667 * root.u;
+            border-color: #000000;
+        }
+    }
+}
+
+// ==========================================================================
+// ServerCard — 实例服务器卡片（44px 高）
+// ==========================================================================
+export component ServerCard {
+    in property <ServerCardData> data;
+    callback connect();          // 原版 BtnConnect_Click（启动并进入服务器）
+    callback refresh();          // 原版 BtnRefresh_Click（刷新状态）
+    callback copy-address();     // 原版 BtnCopy_Click（复制地址）
+    callback edit();             // 原版 BtnEdit_Click（编辑服务器）
+    callback remove();           // 原版 BtnRemove_Click（确认弹窗由宿主处理）
+
+    // 右键菜单项（原版 settings ContextMenu；图标为 lucide 等价物，见偏差 1）
+    property <[MyMenuItemData]> menu-items: [
+        { text: "刷新", icon: @image-url("../assets/icons/lucide/refresh-cw.svg"), has-icon: true, enabled: true },
+        { text: "复制地址", icon: @image-url("../assets/icons/lucide/copy.svg"), has-icon: true, enabled: true },
+        { text: "编辑", icon: @image-url("../assets/icons/lucide/pencil.svg"), has-icon: true, enabled: true },
+        { text: "移除", icon: @image-url("../assets/icons/lucide/trash-2.svg"), has-icon: true, enabled: true },
+    ];
+
+    // 派生显示内容（原版 UpdateServerUi）
+    property <McSignalKind> signal-kind: root.data.status == McServerStatus.Pinging ? McSignalKind.Loading
+        : root.data.status == McServerStatus.Offline ? McSignalKind.Offline
+        : mc-signal-level(root.data.ping);
+    property <string> player-text: root.data.status == McServerStatus.Pinging ? "正在连接"
+        : root.data.status == McServerStatus.Offline ? "离线"
+        : (root.data.players-online != 0 && root.data.players-max != 0
+            ? root.data.players-online + " / " + root.data.players-max : "???");
+    property <string> motd-fallback: root.data.status == McServerStatus.Pinging ? "正在连接..."
+        : "服务器离线";
+    property <length> name-col-width: max(0px, root.width - 457px);   // 6+34+7+350+60
+
+    width: 100%;
+    height: 44px;
+
+    // ---- 卡片外框（与 components/card.slint 相同的 MyCard 镀铬，无标题）----
+    card := Rectangle {
+        width: 100%;
+        height: 100%;
+        clip: true;
+        border-width: 2px;
+        border-radius: 5px;
+        background: touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+        border-color: touch.has-hover ? GlobalTheme.card-border-color-hover : GlobalTheme.card-border-color;
+        drop-shadow-blur: touch.has-hover ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: touch.has-hover ? 0px : 2px;
+        drop-shadow-color: touch.has-hover ? #4890f533 : #343d4a0d;
+        animate border-color { duration: 90ms; }
+        animate background { duration: 90ms; }
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        // 卡片悬停感知（原版 MyCard 鼠标进入/离开换色动画；置于内容下层，
+        // 与 components/card.slint 相同，has-hover 对下层 TouchArea 仍生效）
+        touch := TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        // ---- PanBack（ColorBrushSemiTransparent）----
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: GlobalTheme.color-semi-transparent;
+
+            // 图标（34×34 @ 列1，垂直居中 y=5，圆角 6 裁剪）
+            if root.data.has-icon : Rectangle {
+                x: 6px;
+                y: 5px;
+                width: 34px;
+                height: 34px;
+                border-radius: 6px;
+                clip: true;
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.data.icon;
+                    image-fit: contain;
+                }
+            }
+
+            // 服务器名称（行1 底对齐，14px，MaxWidth 180，省略号）
+            Text {
+                x: 47px;
+                y: 4.5px;
+                width: min(180px, root.name-col-width);
+                height: 17px;
+                text: root.data.name;
+                font-size: 14px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.color1;
+                vertical-alignment: bottom;
+                overflow: elide;
+            }
+
+            // 信号图标（行2 底对齐，20×20 @ y=19.5）
+            McSignalIcon {
+                x: 47px;
+                y: 19.5px;
+                kind: root.signal-kind;
+            }
+
+            // 人数/状态（12px Gray3，Opacity 0.4，垂直居中）
+            Text {
+                x: 67px;
+                y: 21.5px;
+                width: max(0px, root.name-col-width - 20px);
+                height: 18px;
+                text: root.player-text;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray3;
+                opacity: 0.4;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            // MOTD 区（列4：350 宽，右距 3，跨行1-2 居中）
+            Rectangle {
+                x: parent.width - 60px - 3px - 350px;
+                y: 4.5px;
+                width: 350px;
+                height: 34px;
+                clip: true;
+
+                // 在线：渲染 MOTD（最多 2 行 12px 居中）
+                if root.data.status == McServerStatus.Online : VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    alignment: center;
+                    Text {
+                        text: root.data.motd-line1;
+                        font-size: 12px;
+                        font-family: GlobalTheme.font-family;
+                        color: root.data.motd-line1-color;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                    if root.data.motd-line2 != "" : Text {
+                        text: root.data.motd-line2;
+                        font-size: 12px;
+                        font-family: GlobalTheme.font-family;
+                        color: root.data.motd-line2-color;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+                }
+
+                // 连接中/离线：纯文本 ServerMotD（12px Gray4 居中省略号）
+                if root.data.status != McServerStatus.Online : Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.motd-fallback;
+                    font-size: 12px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.gray4;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            // 操作按钮（列5：play 24 + settings 24 LogoScale 1.2，垂直居中）
+            btn-play := MyIconButton {
+                x: parent.width - 60px;
+                y: 10px;
+                self-width: 24px;
+                self-height: 24px;
+                icon: @image-url("../assets/icons/lucide/play.svg");
+                clicked => { root.connect(); }
+            }
+            btn-settings := MyIconButton {
+                x: parent.width - 36px;
+                y: 10px;
+                self-width: 24px;
+                self-height: 24px;
+                logo-scale: 1.2;
+                icon: @image-url("../assets/icons/lucide/settings.svg");
+                clicked => { menu.open(parent.width - 60px, 42px); }
+            }
+        }
+    }
+
+    // 右键菜单（原版 ContextMenu，点 settings 打开）
+    menu := MyMenu {
+        items: root.menu-items;
+        triggered(i) => {
+            if i == 0 { root.refresh(); }
+            else if i == 1 { root.copy-address(); }
+            else if i == 2 { root.edit(); }
+            else if i == 3 { root.remove(); }
+        }
+    }
+}

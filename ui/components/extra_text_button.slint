@@ -1,0 +1,128 @@
+// ==========================================================================
+// PCL-rs 附加文本按钮（大号圆角彩色按钮，如下载页"开始下载"）——
+//   1:1 移植自 PCL-CE MyExtraTextButton
+//   原版文件：Controls/MyExtraTextButton.xaml + Controls/MyExtraTextButton.xaml.cs
+//
+// 结构：总高 52（彩色主体 42，顶部 10px 为 PanClick 半透明点击区），
+//   圆角 = 根高度×0.4 = 20.8，ColorBrush3 主体 + 投影（BlurRadius 10 /
+//   Opacity 0.2 / Depth 0）；左右各 20 内边距，可选 16px 图标（ColorBrush8）
+//   + 16px 字号 ColorBrush8 文本（有图标时文本左移：图标 Margin 2,12,0,12 +
+//   文本 Margin 12,0,0,0.8），宽度随内容自适应。
+//
+// 关键动画参数（与原版一致）：
+//   悬停变色：常态 ColorBrush3 → 悬停 ColorBrush4 120ms / 恢复 150ms；禁用 Gray4
+//   按下：→ 0.80（-0.15/800ms Fluent Strong 与 -0.05/60ms 叠加 ≈ ease-out-quart 800ms）
+//   松开：→ 1.0，300ms OutBack → cubic-bezier(0.28,1.25,0.50,1.0)
+//   按住移出：→ 1.0，500ms Fluent → ease-out
+//   显示：不透明度 0→1（80ms，延迟 50ms）+ 缩放 0→1（延迟 50ms，
+//         OutBack 400ms 与 Fluent 160ms 叠加 ≈ 450ms bezier）
+//   隐藏：不透明度 →0（50ms，延迟 50ms）+ 缩放 →0（100ms EaseInFluent Weak → ease-in-quad）
+//
+// 已知偏差：
+//   1. 仅支持 lucide SVG 图标；原版 SVG 图标忽略 LogoScale，此处 logo-scale 生效。
+//   2. 原版 Inlines 富文本未移植，仅纯文本；ToolTip 未移植。
+//   3. 显示缩放为单段近似（原版为两段并行缩放叠加）。
+//   4. 原版默认 show=false（XAML 初始缩放 0），此处保持一致，使用前需置 true。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export component MyExtraTextButton {
+    in property <string> text: "";
+    in property <image> icon;
+    in property <float> logo-scale: 1.0;
+    in property <bool> enabled: true;
+    in-out property <bool> show: false;   // 原版默认隐藏，由 Show 属性驱动显隐动画
+    callback clicked();
+
+    private property <bool> has-icon: root.icon.width > 0;
+
+    height: 52px;
+    // 有图标：20 + 2 + 16 + 12 + 文本 + 20；无图标：20 + 文本 + 20
+    width: (root.has-icon ? 50px : 20px) + txt.preferred-width + 20px;
+    opacity: root.show ? 1 : 0;
+    animate opacity { duration: root.show ? 80ms : 50ms; delay: 50ms; }
+
+    // ---- 按压缩放（与 MyExtraButton 相同，松开回弹窗口 300ms）----
+    private property <bool> _rel: false;
+    trel := Timer { interval: 300ms; running: root._rel; triggered => { root._rel = false; } }
+    private property <float> press-scale: touch.pressed && touch.has-hover ? 0.80 : 1.0;
+    private property <duration> press-time: touch.pressed && touch.has-hover ? 800ms
+        : root._rel ? 300ms : 500ms;
+    private property <easing> press-ease: touch.pressed && touch.has-hover ? ease-out-quart
+        : root._rel ? cubic-bezier(0.28, 1.25, 0.50, 1.0) : ease-out;
+
+    property <brush> pill-color: !root.enabled ? GlobalTheme.gray4
+        : touch.has-hover ? GlobalTheme.color4 : GlobalTheme.color3;
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled && root.show;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) { root._rel = true; }
+        }
+    }
+
+    // PanClick：整层半透明背景，圆角 = 根高度×0.4 = 20.8
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 20.8px;
+        background: GlobalTheme.color-semi-transparent;
+
+        // 显示/隐藏缩放（原 PanBack RenderTransform）
+        showwrap := Rectangle {
+            width: 100%;
+            height: 100%;
+            transform-scale: root.show ? 1 : 0;
+            animate transform-scale { duration: root.show ? 450ms : 100ms; delay: root.show ? 50ms : 0ms;
+                easing: root.show ? cubic-bezier(0.28, 1.25, 0.50, 1.0) : ease-in-quad; }
+
+            // 按压缩放（原 PanScale，Margin 0,10,0,0 → 主体区域下移 10px）
+            presswrap := Rectangle {
+                y: 10px;
+                width: 100%;
+                height: parent.height - 10px;
+                transform-scale: root.press-scale;
+                animate transform-scale { duration: root.press-time; easing: root.press-ease; }
+
+                // PanColor：彩色主体 + 投影，圆角同 PanClick（绑定根高度×0.4）
+                pill := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    border-radius: 20.8px;
+                    background: root.pill-color;
+                    drop-shadow-blur: 10px;
+                    drop-shadow-offset-x: 0px;
+                    drop-shadow-offset-y: 0px;
+                    drop-shadow-color: #00000033;   // Opacity 0.2
+                    animate background { duration: !root.enabled || touch.has-hover ? 120ms : 150ms; }
+
+                    // IconHost：StackPanel Margin 20,0 + 自身 Margin 2,12,0,12 → x=22，16px
+                    if root.has-icon : Image {
+                        x: 22px;
+                        y: (parent.height - self.height) / 2;
+                        width: 16px * root.logo-scale;
+                        height: 16px * root.logo-scale;
+                        source: root.icon;
+                        colorize: GlobalTheme.color8;
+                        image-fit: contain;
+                    }
+                    // LabText：FontSize 16，ColorBrush8，Margin 底 0.8
+                    txt := Text {
+                        x: root.has-icon ? 50px : 20px;
+                        y: (parent.height - 0.8px - self.height) / 2;
+                        width: self.preferred-width;
+                        height: self.preferred-height;
+                        text: root.text;
+                        font-size: 16px;
+                        font-family: GlobalTheme.font-family;
+                        color: GlobalTheme.color8;
+                    }
+                }
+            }
+        }
+    }
+}

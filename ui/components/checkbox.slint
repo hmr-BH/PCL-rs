@@ -1,0 +1,226 @@
+// PCL-rs checkbox component — 1:1 port of PCL-CE MyCheckBox
+// All easing formulas from PCL-CE ModAnimation.cs:
+//   AniEaseOutFluent(n):  f(t) = 1 - (1-t)^n      Weak=2 Mid=3 Strong=4 XStrong=5
+//   AniEaseOutBack(n):    f(t) = 1 - (1-t)^p·cos(1.5π·t)   p = 3 - n/2
+//   AniEaseInFluent(n):   f(t) = t^n
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// ==========================================================================
+// MyCheckBox — boolean checkbox
+// ==========================================================================
+
+export component MyCheckBox {
+    in property <length> self-width: 160px;
+    in property <length> self-height: 22px;
+    in property <string> text: "CheckBox";
+    in property <bool> enabled: true;
+    in-out property <bool> checked: false;
+    callback clicked();
+
+    width: self-width;
+    height: self-height;
+
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => { root.checked = !root.checked; root.clicked(); }
+    }
+
+    property <brush> border-color: {
+        if !root.enabled { GlobalTheme.checkbox-border-disabled }
+        else if touch.has-hover { GlobalTheme.checkbox-border-hover }
+        else if root.checked { GlobalTheme.checkbox-border-checked }
+        else { GlobalTheme.checkbox-border-unchecked }
+    };
+    property <brush> text-color: {
+        if !root.enabled { GlobalTheme.checkbox-border-disabled }
+        else if touch.has-hover { GlobalTheme.primary-text-color }
+        else { GlobalTheme.secondary-text-color }
+    };
+    property <brush> bg: touch.pressed
+        ? GlobalTheme.checkbox-background-pressed
+        : GlobalTheme.checkbox-background;
+
+    // ---- Border bounce ----
+    private property <int> _bt: 0;
+    t1 := Timer { interval: 105ms; running: root._bt == 1; triggered => { root._bt = 2; } }
+    t2 := Timer { interval: 280ms; running: root._bt == 2; triggered => { root._bt = 0; } }
+    property <float> _bs: {
+        if touch.pressed { 0.917 }
+        else if root._bt == 0 { 1.0 }
+        else if root._bt == 1 { 0.667 }
+        else { 1.0 }
+    };
+
+    // ---- Checkmark ----
+    private property <float> _cs: 0.0;
+    private property <int> _ct: 0;
+    tc := Timer { interval: 105ms; running: root._ct > 0; triggered => { root._cs = 1.0; root._ct = 0; } }
+
+    changed checked => {
+        root._bt = 1;
+        if root.checked { root._ct += 1; } else { root._cs = 0.0; }
+    }
+
+    // ===== RENDER =====
+    HorizontalLayout {
+        padding: 2px; spacing: 4px; alignment: start;
+        Rectangle {
+            width: 18px; height: 18px;
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: GlobalTheme.corner-radius;
+                border-width: 1.1px;
+                border-color: root.border-color;
+                background: root.bg;
+                transform-scale: root._bs;
+                animate border-color { duration: 150ms; }
+                animate background { duration: 100ms; }
+                animate transform-scale { duration: 200ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+            }
+            Path {
+                x: 4px; y: 3px; width: 12px; height: 12px;
+                fill: root.border-color;
+                commands: "M0,6L1.5,4.5 4.5,7.5 10.5,1.5 12,3 4.5,10.5 0,6z";
+                transform-scale: root._cs;
+                animate fill { duration: 150ms; }
+                animate transform-scale { duration: 300ms; easing: cubic-bezier(0.28, 1.18, 0.50, 1.0); }
+            }
+            Rectangle {
+                x: 4px; y: 4px; width: 10px; height: 10px;
+                border-radius: 2px;
+                background: GlobalTheme.checkbox-indeterminate-block;
+                transform-scale: 0.0;
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.text-color;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            animate color { duration: 200ms; }
+        }
+    }
+}
+
+export component TriStateCheckBox {
+    in property <int> total: 0;
+    in property <int> selected: 0;
+    in property <string> text: "全选";
+    in property <bool> enabled: true;
+    callback toggle_all();
+
+    // Derived state — computed fresh each time selected/total change
+    private property <bool> is_checked: root.total > 0 && root.selected == root.total;
+    private property <bool> is_indeterminate: root.selected > 0 && root.selected < root.total;
+
+    width: 200px;
+    height: 22px;
+
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        // Trigger the border bounce immediately on click (same moment as MyCheckBox),
+        // then let the external logic update `selected`.
+        clicked => { root._bt = 1; root.toggle_all(); }
+    }
+
+    property <brush> border-color: {
+        if !root.enabled { GlobalTheme.checkbox-border-disabled }
+        else if touch.has-hover { GlobalTheme.checkbox-border-hover }
+        else if root.is_checked { GlobalTheme.checkbox-border-checked }
+        else { GlobalTheme.checkbox-border-unchecked }
+    };
+    property <brush> text-color: {
+        if !root.enabled { GlobalTheme.checkbox-border-disabled }
+        else if touch.has-hover { GlobalTheme.primary-text-color }
+        else { GlobalTheme.secondary-text-color }
+    };
+    property <brush> bg: touch.pressed
+        ? GlobalTheme.checkbox-background-pressed
+        : GlobalTheme.checkbox-background;
+
+    // ---- Border bounce (SAME as MyCheckBox) ----
+    private property <int> _bt: 0;
+    t1 := Timer { interval: 105ms; running: root._bt == 1; triggered => { root._bt = 2; } }
+    t2 := Timer { interval: 300ms; running: root._bt == 2; triggered => { root._bt = 0; } }
+    property <float> _bs: {
+        if touch.pressed { 0.917 }
+        else if root._bt == 0 { 1.0 }
+        else if root._bt == 1 { 0.667 }
+        else { 1.0 }
+    };
+
+    // ---- Checkmark (SAME as MyCheckBox) ----
+    private property <float> _cs: 0.0;
+    private property <int> _ct: 0;
+    tc := Timer { interval: 105ms; running: root._ct > 0; triggered => { root._cs = 1.0; root._ct = 0; } }
+
+    // ---- Indeterminate block (SAME pattern) ----
+    private property <float> _is: 0.0;
+    private property <int> _it: 0;
+    ti := Timer { interval: 105ms; running: root._it > 0; triggered => { root._is = 1.0; root._it = 0; } }
+
+    // ---- State change: single changed handler via selected ----
+    // selected changes → both is_checked and is_indeterminate may flip.
+    // We guard with _ps (prev selected) to skip redundant fires.
+    // IMPORTANT: _ps must NOT be bound to root.selected; it is an explicit
+    // snapshot written inside the handler. A binding would make the guard
+    // always true and suppress all animations.
+    private property <int> _ps: 0;
+
+    changed selected => {
+        if root.selected == root._ps { return; }
+        // Border bounce is handled in touch.clicked so it fires exactly once per click.
+        if root.is_checked { root._ct += 1; } else { root._cs = 0.0; }
+        if root.is_indeterminate { root._it += 1; } else { root._is = 0.0; }
+        root._ps = root.selected;
+    }
+
+    // ===== RENDER — SAME as MyCheckBox (plus indeterminate) =====
+    HorizontalLayout {
+        padding: 2px; spacing: 4px; alignment: start;
+        Rectangle {
+            width: 18px; height: 18px;
+            Rectangle {
+                width: 100%; height: 100%;
+                border-radius: GlobalTheme.corner-radius;
+                border-width: 1.1px;
+                border-color: root.border-color;
+                background: root.bg;
+                transform-scale: root._bs;
+                animate border-color { duration: 150ms; }
+                animate background { duration: 100ms; }
+                animate transform-scale { duration: 200ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+            }
+            Path {
+                x: 4px; y: 3px; width: 12px; height: 12px;
+                fill: root.border-color;
+                commands: "M0,6L1.5,4.5 4.5,7.5 10.5,1.5 12,3 4.5,10.5 0,6z";
+                transform-scale: root._cs;
+                animate fill { duration: 150ms; }
+                animate transform-scale { duration: 300ms; easing: cubic-bezier(0.28, 1.18, 0.50, 1.0); }
+            }
+            Rectangle {
+                x: 4px; y: 4px; width: 10px; height: 10px;
+                border-radius: 2px;
+                background: GlobalTheme.checkbox-indeterminate-block;
+                transform-scale: root._is;
+                animate background { duration: 150ms; }
+                animate transform-scale { duration: 300ms; easing: cubic-bezier(0.28, 1.18, 0.50, 1.0); }
+            }
+        }
+        Text {
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.text-color;
+            vertical-alignment: center;
+            horizontal-alignment: left;
+            animate color { duration: 200ms; }
+        }
+    }
+}

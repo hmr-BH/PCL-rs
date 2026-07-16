@@ -1,0 +1,245 @@
+// PCL-rs 加载指示器 — 1:1 移植 PCL-CE MyLoading（Controls/MyLoading.xaml + .xaml.cs）
+//
+// 注意：原版 PCL-CE 的 MyLoading 是"镐子挥挖"动画（PathPickaxe 绕点旋转 + 碎屑飞溅），
+//       并非圆环转圈。本文件忠实复刻镐子动画。
+//
+// 结构（原版 60×47 图标区 + 下方文字）：
+//   PathPickaxe：35×35 位于 (10,6)，绕元素内 (30,30) 旋转，静止角 55°；
+//   PathLeft/PathRight：3×5 碎屑三角，位于 (7,41)/(14,41)，±45°；
+//   PathError：17×17 红叉，位于 (4,23)，初始缩放 0.6；
+//   底部基线：25×2；LabText：16px，Margin 0,10,0,0。
+//
+// 挥挖循环（原版 AniLoop，总周期 1500ms，由 Timer 驱动的程序化动画精确复刻）：
+//   t∈[0,250)    静止于 55°；
+//   t∈[250,600)  蓄力上挥 55°→-20°（350ms AniEaseInBack(Weak)：f(u)=u²·cos(1.5π(1-u))）；
+//   t∈[600,1500) 下砸回位 -20°→55°，两条动画并发叠加：
+//                 +50°（900ms AniEaseOutFluent(Middle)：1-(1-u)³）
+//                 +25°（900ms AniEaseOutElastic(Weak)：1-(1-u)^1.25·cos(2.5π·u^1.5)）；
+//   t∈[600,780)  碎屑出现并向两侧飞溅 ±5px、上移 -6px（180ms OutFluent），
+//                 650~750ms 淡出（100ms, delay 50）。
+//
+// 错误态（ErrorAnimation）：
+//   前景 300ms → ColorBrushRedLight；红叉 opacity 0→1 100ms (delay 300)、
+//   缩放 0.6→1 400ms OutBack；恢复时 opacity→0 100ms、缩放→0.5 200ms、颜色 300ms 还原。
+//
+// 状态：Run=转动 / Stop=静止 / Error=错误（点击可重试，clicked 回调由宿主处理）。
+// ShowProgress 时文字为 "text - 42%"（对应原版 Lang.Number(State.Progress, "P0")）。
+//
+// 已知偏差：
+//   - 原版镐子描边 StrokeThickness=2（视图坐标），换算到屏幕约 0.08px 亚像素；
+//     此处按视觉观感取屏幕约 1px（viewbox 内 24px），为观感等效而非数值等效。
+//   - errorAnimationWaiting（错误动画等待挥挖）简化为固定 300ms 延迟。
+//   - 错误文本的网络异常归类（TextErrorInherit）由 Rust 侧覆写 text-error 实现。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 对应原版 MyLoading.MyLoadingState
+export enum MyLoadingState {
+    Unloaded,
+    Run,
+    Stop,
+    Error,
+}
+
+export component MyLoading {
+    in property <string> text: "加载中...";
+    in property <string> text-error: "加载失败";
+    in property <bool> show-progress: false;
+    in property <float> progress: 0;                 // 0..1
+    in property <brush> foreground: GlobalTheme.color3;
+    in property <MyLoadingState> state: MyLoadingState.Run;
+    in property <bool> has-animation: true;
+    callback clicked();                              // 整控件可点（失败时宿主用作重试）
+
+    // ---- 原版缓动公式（ModAnimation.cs）----
+    pure function ease-inback-weak(u: float) -> float {
+        // AniEaseInBack(Weak)：p = 3 - 2/2 = 2 → u²·cos(1.5π(1-u))
+        return u * u * Math.cos(270deg * (1 - u));
+    }
+    pure function ease-outfluent-mid(u: float) -> float {
+        // AniEaseOutFluent(Middle)：1-(1-u)³
+        return 1 - Math.pow(1 - u, 3);
+    }
+    pure function ease-outelastic-weak(u: float) -> float {
+        // AniEaseOutElastic(Weak)：p = 2+4 = 6 → 1-(1-u)^1.25·cos(2.5π·u^1.5)
+        return 1 - Math.pow(1 - u, 1.25) * Math.cos(450deg * Math.pow(u, 1.5));
+    }
+    pure function windup-angle(t: float) -> float {
+        return 55 - 75 * ease-inback-weak((t - 250) / 350);
+    }
+    pure function slam-angle(t: float) -> float {
+        return -20 + 50 * ease-outfluent-mid((t - 600) / 900)
+                  + 25 * ease-outelastic-weak((t - 600) / 900);
+    }
+    pure function pickaxe-angle(t: float) -> float {
+        if t < 250 { return 55; }
+        if t < 600 { return windup-angle(t); }
+        return slam-angle(t);
+    }
+
+    // ---- 循环时钟（Stop/Error 时冻结）----
+    property <duration> elapsed: 0ms;
+    Timer {
+        interval: 16ms;
+        running: root.state == MyLoadingState.Run && root.has-animation;
+        triggered => { root.elapsed += 16ms; }
+    }
+    property <float> tau: Math.mod(root.elapsed / 1ms, 1500);
+    property <float> angle: pickaxe-angle(root.tau);
+
+    // ---- 碎屑（t∈[600,780) 飞溅，650~750 淡出）----
+    property <float> chip-u: Math.clamp((root.tau - 600) / 180, 0, 1);
+    property <float> chip-e: ease-outfluent-mid(root.chip-u);
+    property <float> chip-op: root.state != MyLoadingState.Run ? 0
+        : root.tau < 600 ? 0
+        : root.tau < 650 ? 1
+        : Math.clamp(1 - (root.tau - 650) / 100, 0, 1);
+
+    // ---- 错误态（err-phase：0 无 / 1 等待 300ms / 2 显示 / 3 消退）----
+    property <int> err-phase: 0;
+    changed state => {
+        if root.state == MyLoadingState.Error {
+            root.err-phase = 1;
+        } else if root.err-phase == 1 || root.err-phase == 2 {
+            root.err-phase = 3;
+        }
+    }
+    Timer {
+        interval: 300ms;
+        running: root.err-phase == 1;
+        triggered => { root.err-phase = 2; }
+    }
+    Timer {
+        interval: 300ms;
+        running: root.err-phase == 3;
+        triggered => { root.err-phase = 0; }
+    }
+    property <float> err-op: root.err-phase == 2 ? 1 : 0;
+    animate err-op { duration: 100ms; }
+    property <float> err-scale: root.err-phase == 2 ? 1 : (root.err-phase == 3 ? 0.5 : 0.6);
+    animate err-scale { duration: root.err-phase == 2 ? 400ms : 200ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+
+    // ---- 前景色（错误 → 红，300ms）----
+    property <brush> fg: root.state == MyLoadingState.Error ? GlobalTheme.red-light : root.foreground;
+    animate fg { duration: 300ms; }
+
+    // ---- 显示文本 ----
+    property <string> display-text: root.state == MyLoadingState.Error ? root.text-error
+        : (root.show-progress ? root.text + " - " + Math.round(root.progress * 100) + "%" : root.text);
+
+    width: min(360px, max(60px, lab.preferred-width));
+    height: max(50px, root-lay.preferred-height);
+
+    root-lay := VerticalLayout {
+        width: 100%;
+        height: 100%;
+        alignment: center;
+        spacing: 10px;
+
+        // ---- 图标区（60×47，水平居中）----
+        Rectangle {
+            preferred-height: 47px;
+            grid := Rectangle {
+                x: (parent.width - 60px) / 2;
+                y: 0px;
+                width: 60px;
+                height: 47px;
+
+                // 镐子（35×35 @ (10,6)，绕 (30,30) 旋转）
+                pick := Rectangle {
+                    x: 10px;
+                    y: 6px;
+                    width: 35px;
+                    height: 35px;
+                    transform-rotation: root.state == MyLoadingState.Run ? root.angle * 1deg : 55deg;
+                    transform-origin: { x: 30px, y: 30px };
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-x: 60;
+                        viewbox-y: 46;
+                        viewbox-width: 905;
+                        viewbox-height: 905;
+                        stroke: root.fg;
+                        stroke-width: 24px;
+                        fill: transparent;
+                        commands: "M 963.6 858.2 L 410.816 305.504 C 508.116 213.304 609.204 196.8 711.104 128.6 837.11367 49.573762 879.34045 50.334062 751.5 49.5 611.3 52 471.8 96.2 353.3 182.4 309.8 155.7 252.1 161.2 214.5 198.9 176.9 236.6 171.3 294.2 198 337.7 111.8 456.3 67.6 595.8 65.1 735.9 63.315254 883.82034 65.077966 837.29308 144.2 695.488 212.4 593.588 228.888 492.4 321.088 395.2 L 873.9 948 c 0.60001 0.59999 1.6 0.6 2.2 0 l 87.5 -87.5 c 0.6 -0.7 0.6 -1.6 0 -2.3 z";
+                        animate stroke { duration: 300ms; }
+                    }
+                }
+
+                // 左碎屑（3×5 @ (7,41)，-45°）
+                Path {
+                    x: 7px - 5px * root.chip-e;
+                    y: 41px - 6px * root.chip-e;
+                    width: 3px;
+                    height: 5px;
+                    viewbox-width: 2;
+                    viewbox-height: 4;
+                    fill: root.fg;
+                    opacity: root.chip-op;
+                    transform-rotation: -45deg;
+                    commands: "M0,0 L2,0 L1,4 z";
+                    animate fill { duration: 300ms; }
+                }
+                // 右碎屑（3×5 @ (14,41)，+45°）
+                Path {
+                    x: 14px + 5px * root.chip-e;
+                    y: 41px - 6px * root.chip-e;
+                    width: 3px;
+                    height: 5px;
+                    viewbox-width: 2;
+                    viewbox-height: 4;
+                    fill: root.fg;
+                    opacity: root.chip-op;
+                    transform-rotation: 45deg;
+                    commands: "M0,0 L2,0 L1,4 z";
+                    animate fill { duration: 300ms; }
+                }
+
+                // 错误红叉（17×17 @ (4,23)，缩放 0.6→1）
+                Path {
+                    x: 4px;
+                    y: 23px;
+                    width: 17px;
+                    height: 17px;
+                    viewbox-width: 20;
+                    viewbox-height: 20;
+                    fill: root.fg;
+                    fill-rule: evenodd;
+                    opacity: root.err-op;
+                    transform-scale: root.err-scale;
+                    commands: "M2,0 L0,2 8,10 0,18 2,20 10,12 18,20 20,18 12,10 20,2 18,0 10,8 2,0 Z";
+                    animate fill { duration: 300ms; }
+                }
+
+                // 底部基线（25×2，左下）
+                Rectangle {
+                    x: 0px;
+                    y: 45px;
+                    width: 25px;
+                    height: 2px;
+                    background: root.fg;
+                    animate background { duration: 300ms; }
+                }
+            }
+        }
+
+        // ---- 文字（16px，居中，自动换行）----
+        lab := Text {
+            text: root.display-text;
+            font-size: 16px;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            animate color { duration: 300ms; }
+        }
+    }
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        clicked => { root.clicked(); }
+    }
+}

@@ -1,0 +1,71 @@
+// ==========================================================================
+// PCL-rs 文本按钮 —— 1:1 移植自 PCL-CE MyTextButton
+//   原版文件：Controls/MyTextButton.cs（无 XAML；
+//             控件模板见 Application.xaml 第 121~139 行：Padding=0 的
+//             Border(Background=ColorBrushSemiTransparent) + TextBlock）
+//
+// 关键动画参数（与原版一致，原版无缩放/下划线）：
+//   悬停：前景 ColorBrush1 → ColorBrush3，100ms（animationTimeIn）
+//   按下：→ ColorBrush4，30ms
+//   离开：→ ColorBrush1，200ms（animationTimeOut）
+//   文本切换：淡出 50ms → 换文本 → 淡入 170ms（原版 TextProperty 回调）
+//
+// 已知偏差：
+//   1. 原版禁用态不变色、仅不响应点击，此处同样仅禁用点击（与原版一致）。
+//   2. changed 回调在组件初始化时不触发，故用一次性 Timer 对齐初始文本。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export component MyTextButton {
+    in property <string> text: "";
+    in property <length> font-size: GlobalTheme.font-size;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: txt.preferred-width;
+    height: txt.preferred-height;
+
+    property <brush> fg: touch.pressed && touch.has-hover ? GlobalTheme.color4
+        : touch.has-hover ? GlobalTheme.color3 : GlobalTheme.color1;
+    private property <duration> fg-time: touch.pressed && touch.has-hover ? 30ms
+        : touch.has-hover ? 100ms : 200ms;
+
+    // ---- 文本切换淡入淡出 ----
+    private property <string> _shown;
+    private property <bool> _inited: false;
+    private property <int> _ft: 0;   // 0 正常显示 / 1 淡出换词中
+    ti := Timer { interval: 1ms; running: !root._inited; triggered => { root._shown = root.text; root._inited = true; } }
+    tf := Timer { interval: 50ms; running: root._ft == 1; triggered => { root._shown = root.text; root._ft = 0; } }
+    changed text => {
+        if (root._inited && root._ft == 0 && root.text != root._shown) { root._ft = 1; }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    // 原版模板：Border(Background=ColorBrushSemiTransparent) + TextBlock，Padding=0
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: GlobalTheme.color-semi-transparent;
+
+        txt := Text {
+            x: 0;
+            y: 0;
+            width: self.preferred-width;
+            height: self.preferred-height;
+            text: root._shown;
+            font-size: root.font-size;
+            font-family: GlobalTheme.font-family;
+            color: root.fg;
+            opacity: root._ft == 1 ? 0 : 1;
+            animate color { duration: root.fg-time; }
+            animate opacity { duration: root._ft == 1 ? 50ms : 170ms; }
+        }
+    }
+}

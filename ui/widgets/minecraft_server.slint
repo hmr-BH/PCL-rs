@@ -1,0 +1,250 @@
+// ==========================================================================
+// PCL-rs 小部件：Minecraft 服务器查询结果 + 查询输入 — 1:1 移植
+// 原版文件：
+//   Controls/MinecraftServer.xaml + .xaml.cs（服务器图标 / 标题 / MOTD / 人数 / 延迟）
+//   Controls/MinecraftServerQuery.xaml + .xaml.cs（地址输入框 + 查询按钮 + 结果边框）
+//   PCL.Core/UI/Controls/MotdRenderer.xaml.cs（MOTD § 代码白底色表）
+//   Modules/Minecraft/ModStyle.cs SetColorfulTextLab（人数/延迟着色）
+//
+// 结构（原版 MinecraftServer Grid，三列 Auto | * | Auto）：
+//   图标 54×54 Margin 6；描述文本 15px Margin 6（查询中=白"查询中..."，
+//   在线=白"Minecraft 服务器"，错误=红"无法连接: …"）；
+//   MOTD 区 Margin 0,20,3,1、宽 300、垂直居中（最多 2 行、14px、白底色表默认 #888888）；
+//   右侧人数 12px 右对齐 Margin 6：在线 "x/y"（#888888）+ "Nms"（分档色），否则白 "-/-"。
+//
+// 延迟分档（原版 UpdateServerStatus；SetColorfulTextLab 传 isDarkMode=false → 白底色表）：
+//   <150ms → §a #009900；<400ms → §6 #CC7000；否则 §c #CC0000。
+//
+// MinecraftServerQuery（原版 Grid 两行）：
+//   MyTextBox（水印"输入服务器地址"，右距 15，BlacklistValidator "/"）
+//   + MyButton "查询"（宽 60）；结果 Border：Margin 0,7,0,0、圆角 5、
+//   2px ColorBrush5 边、server_bg.png 124×124 平铺暗色底（原版 await 完成后才 Visible）。
+//
+// 已知偏差：
+//   1. server_bg.png 平铺纹理由宿主经 background-image 传入；未传入时以原纹理
+//      平均色 #211710 兜底（PCL-rs assets 尚未收录该图，本文件不允许改动 ui/widgets 之外）。
+//   2. MOTD 的 § 分段着色/加粗/随机字由 Rust 侧解析；本组件按整行单色渲染
+//      （motd-lineN-color 由 Rust 按白底色表给出，默认 #888888）。
+//   3. 加载中显示"查询中" + 省略号循环动画（原版为静态"查询中..."，按任务要求补 loading 动画）。
+//   4. 查询按钮仅发出 query 回调；结果边框显示时机由宿主控制（原版 await 结束后才 Visible），
+//      因此"查询中"态仅在二次查询（边框已可见）时出现，与原版一致。
+//   5. McServerState.Offline 为扩展态（原版 MinecraftServer 只有 查询中/在线/错误），
+//      显示为灰标题 + "-/-"，供复用方使用。
+//   6. 默认服务器图标（DefaultServer.png）未收录，由宿主以 has-icon + icon 显式传入。
+//   7. 回车不触发查询（原版未订阅 MyTextBox 的 Enter 自定义事件）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyTextBox } from "../components/text_box.slint";
+import { MyButton } from "../components/button.slint";
+
+// 服务器查询状态（原版流程：查询中 → 在线 / 错误；离线为扩展态，见偏差 5）
+export enum McServerState { Loading, Online, Offline, Error }
+
+// 延迟质量分档（原版 latencyColor 三元判断）
+export enum McLatencyQuality { Good, Medium, Bad }
+
+// 原版分档规则：<150ms → §a；<400ms → §6；否则 §c
+export pure function mc-latency-quality(latency: int) -> McLatencyQuality {
+    return latency < 150 ? McLatencyQuality.Good
+        : latency < 400 ? McLatencyQuality.Medium : McLatencyQuality.Bad;
+}
+
+// 服务器数据模型（数据全部由 Rust 侧 ping 结果填充，无假数据）
+export struct MinecraftServerData {
+    icon: image,                 // 服务器 favicon
+    has-icon: bool,              // 是否有图标（无则不绘制，见偏差 6）
+    name: string,                // 标题（原版固定 "Minecraft 服务器"）
+    motd-line1: string,          // MOTD 第一行（§ 代码已由 Rust 剥离）
+    motd-line2: string,          // MOTD 第二行
+    motd-line1-color: brush,     // 第一行颜色（Rust 按白底色表解析，默认 #888888）
+    motd-line2-color: brush,     // 第二行颜色
+    players-online: string,      // 在线人数
+    players-max: string,         // 最大人数
+    latency: int,                // 延迟 ms
+    quality: McLatencyQuality,   // 延迟分档（由 mc-latency-quality 计算）
+    state: McServerState,        // 查询状态
+    error-text: string,          // 错误描述（state=Error 时显示，原版 "无法连接: {0}"）
+}
+
+// ==========================================================================
+// MinecraftServer — 服务器查询结果展示（66px 高，透明底，置于暗色背景上）
+// ==========================================================================
+export component MinecraftServer inherits Rectangle {
+    in-out property <MinecraftServerData> data;
+
+    // ---- 加载省略号循环（400ms 步进，见偏差 3）----
+    property <int> _dots: 0;
+    dot-timer := Timer {
+        interval: 400ms;
+        running: root.data.state == McServerState.Loading;
+        triggered => { root._dots = Math.mod(root._dots + 1, 4); }
+    }
+    property <string> _dot-str: root._dots == 1 ? "." : root._dots == 2 ? ".."
+        : root._dots == 3 ? "..." : "";
+
+    // 延迟分档色（白底色表 §a/§6/§c）
+    property <brush> _latency-color: root.data.quality == McLatencyQuality.Good ? #009900
+        : root.data.quality == McLatencyQuality.Medium ? #CC7000 : #CC0000;
+    // 描述文本内容与颜色（错误=Brushes.Red #FF0000）
+    property <brush> _desc-color: root.data.state == McServerState.Error ? #ff0000
+        : root.data.state == McServerState.Offline ? #888888 : #ffffff;
+    property <string> _desc-text: root.data.state == McServerState.Loading ? "查询中" + root._dot-str
+        : root.data.state == McServerState.Error ? root.data.error-text : root.data.name;
+
+    height: 66px;               // 图标 54 + Margin 6×2
+    background: #00000000;      // 原版 Grid 无背景（由外层 Border 提供暗底）
+
+    // ---- 服务器图标（54×54，Margin 6，原版 Stretch=Uniform）----
+    if root.data.has-icon : Image {
+        x: 6px;
+        y: 6px;
+        width: 54px;
+        height: 54px;
+        source: root.data.icon;
+        image-fit: contain;
+    }
+
+    // ---- 描述文本（15px，x=图标列66+Margin6，顶对齐，可换行）----
+    desc := Text {
+        x: 72px;
+        y: 6px;
+        width: max(0px, parent.width - 72px - 90px);
+        text: root._desc-text;
+        font-size: 15px;
+        font-family: GlobalTheme.font-family;
+        color: root._desc-color;
+        wrap: word-wrap;
+        vertical-alignment: top;
+        animate color { duration: 150ms; }
+    }
+
+    // ---- MOTD 区（Margin 0,20,3,1 → x=66,y=20,宽300,高45；2 行 14px 居中）----
+    if root.data.state == McServerState.Online : Rectangle {
+        x: 66px;
+        y: 20px;
+        width: 300px;
+        height: 45px;
+        clip: true;
+        VerticalLayout {
+            width: 100%;
+            height: 100%;
+            alignment: center;
+            Text {
+                text: root.data.motd-line1;
+                font-size: 14px;
+                font-family: GlobalTheme.font-family;
+                color: root.data.motd-line1-color;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+            if root.data.motd-line2 != "" : Text {
+                text: root.data.motd-line2;
+                font-size: 14px;
+                font-family: GlobalTheme.font-family;
+                color: root.data.motd-line2-color;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // ---- 人数/延迟（12px，右对齐，Margin 6）----
+    player := VerticalLayout {
+        x: parent.width - 6px - self.preferred-width;
+        y: 6px;
+        width: self.preferred-width;
+        alignment: start;
+        p1 := Text {
+            // 在线：白底色表默认色 #888888 的 "x/y"；其余状态：白 "-/-"（原版查询中显示 "-/-"）
+            text: root.data.state == McServerState.Online
+                ? (root.data.players-online == "" ? "-/-" : root.data.players-online + "/" + root.data.players-max)
+                : "-/-";
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: root.data.state == McServerState.Online ? #888888 : #ffffff;
+            horizontal-alignment: right;
+            animate color { duration: 150ms; }
+        }
+        if root.data.state == McServerState.Online : Text {
+            text: root.data.latency + "ms";
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: root._latency-color;
+            horizontal-alignment: right;
+            animate color { duration: 150ms; }
+        }
+    }
+}
+
+// ==========================================================================
+// MinecraftServerQuery — 地址输入 + 查询按钮 + 暗底结果边框
+// ==========================================================================
+export component MinecraftServerQuery inherits Rectangle {
+    in-out property <MinecraftServerData> server;
+    in-out property <string> address: "";
+    in property <bool> result-visible: false;      // 原版 ServerInfo.Visibility（查询完成后由宿主置真）
+    in property <image> background-image;          // server_bg.png 平铺纹理（见偏差 1）
+    in property <string> address-validate-result: "";  // 地址校验错误（原版 BlacklistValidator "/"）
+    callback query(string);                        // 点击"查询"（原版 BtnServerQuery_Click）
+
+    height: tb.height + (root.result-visible ? 7px + 66px : 0px);
+    background: #00000000;
+
+    // ---- 地址输入框（右距 15）----
+    tb := MyTextBox {
+        x: 0px;
+        y: 0px;
+        width: parent.width - 60px - 15px;
+        hint-text: "输入服务器地址";
+        text <=> root.address;
+        validate-result: root.address-validate-result;
+    }
+
+    // ---- 查询按钮（宽 60；原版随 Grid 行高拉伸，故跟随 tb 高度）----
+    btn := MyButton {
+        x: parent.width - 60px;
+        y: 0px;
+        self-width: 60px;
+        self-height: tb.height;
+        text: "查询";
+        clicked => { root.query(root.address); }
+    }
+
+    // ---- 结果边框（Margin 0,7,0,0；圆角 5；2px ColorBrush5 边；124px 平铺暗底）----
+    if root.result-visible : bg := Rectangle {
+        x: 0px;
+        y: tb.height + 7px;
+        width: 100%;
+        height: 66px;
+        border-radius: 5px;
+        border-width: 2px;
+        border-color: GlobalTheme.color5;
+        clip: true;
+        background: #211710;      // server_bg.png 平均色兜底（见偏差 1）
+
+        // 平铺纹理（原版 ImageBrush TileMode=Tile，Viewport 124×124 绝对单位）
+        property <int> tile-cols: Math.max(1, Math.ceil(self.width / 124px));
+        property <int> tile-rows: Math.max(1, Math.ceil(self.height / 124px));
+        for r in bg.tile-rows : Rectangle {
+            y: r * 124px;
+            for c in bg.tile-cols : Image {
+                x: c * 124px;
+                y: 0px;
+                width: 124px;
+                height: 124px;
+                source: root.background-image;
+                image-fit: fill;
+            }
+        }
+
+        // 服务器查询结果
+        MinecraftServer {
+            x: 0px;
+            y: 0px;
+            width: 100%;
+            height: 100%;
+            data <=> root.server;
+        }
+    }
+}

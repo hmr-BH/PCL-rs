@@ -1,0 +1,125 @@
+// ==========================================================================
+// PCL-rs 图标按钮 —— 1:1 移植自 PCL-CE MyIconButton
+//   原版文件：Controls/MyIconButton.xaml + Controls/MyIconButton.xaml.cs
+//
+// 结构：外层圆形 Border（Background = ColorBrushSemiTransparent）内套圆形
+//   PanBack（仅 White 主题悬停时垫 50/255 白底），图标区 = 边长 - 10（Margin=5）。
+//
+// 关键动画参数（与原版一致）：
+//   悬停变色：进入 120ms / 离开 150ms（animationColorIn/Out）
+//   按下缩放：1.0 → 0.8，400ms Fluent Strong → ease-out-quart
+//   松开回弹：→ 1.05（250ms OutBack Weak → cubic-bezier(0.28,1.25,0.50,1.0)）
+//             → 1.0（250ms Fluent Strong → ease-out-quart），Timer 链驱动
+//   按住移出：→ 1.0，250ms Fluent → ease-out
+//
+// 主题取色（原版 RefreshAnim）：
+//   Color：常态 ColorBrush4 → 悬停 ColorBrush2
+//   White：图标恒定 #eaf2fe，悬停时背景 → #32ffffff
+//   Red：常态 #a0ff4c4c → 悬停 #ffff4c4c
+//   Black：常态 #a0000000 → 悬停 #e6000000
+//   Custom：foreground 透明度 160/255 → 255/255
+//
+// 已知偏差：
+//   1. 仅支持 lucide SVG 图标（原版 WPF Path Logo 未移植）；
+//      原版 SVG 图标忽略 LogoScale，此处 logo-scale 对 SVG 同样生效。
+//   2. Black 主题仅按浅色模式取色（PCL-rs 暂无深色主题）。
+//   3. 原版 AniDispose 销毁动画、Focus() 行为未移植。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export enum IconButtonTheme { Color, White, Black, Red, Custom }
+
+export component MyIconButton {
+    in property <length> self-width: 28px;
+    in property <length> self-height: 28px;
+    in property <image> icon;
+    in property <float> logo-scale: 1.0;
+    in property <IconButtonTheme> theme: IconButtonTheme.Color;
+    in property <brush> foreground: #808080;   // Custom 主题前景色
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: self-width;
+    height: self-height;
+
+    // ---- 图标颜色（原版 RefreshAnim 各主题取色）----
+    property <brush> icon-color: {
+        if root.theme == IconButtonTheme.Custom {
+            touch.has-hover ? root.foreground.with-alpha(1.0) : root.foreground.with-alpha(0.627)   // 160/255
+        } else if root.theme == IconButtonTheme.White {
+            GlobalTheme.color8   // #eaf2fe（原版 MyColor(234,242,254)）
+        } else if root.theme == IconButtonTheme.Red {
+            touch.has-hover ? #ffff4c4c : #a0ff4c4c
+        } else if root.theme == IconButtonTheme.Black {
+            touch.has-hover ? #e6000000 : #a0000000
+        } else {   // Color：常态 ColorBrush4，悬停 ColorBrush2
+            touch.has-hover ? GlobalTheme.color2 : GlobalTheme.color4
+        }
+    };
+    // ---- 圆形背景（仅 White 主题悬停时垫一层 50/255 白）----
+    property <brush> back-color: root.theme == IconButtonTheme.White && touch.has-hover
+        ? #32ffffff : #00000000;
+
+    // ---- 松开回弹状态机：0 常态 / 1 弹至 1.05 / 2 回落至 1.0 ----
+    private property <int> _st: 0;
+    private property <bool> _held: false;
+    t1 := Timer { interval: 250ms; running: root._st == 1; triggered => { root._st = 2; } }
+    t2 := Timer { interval: 250ms; running: root._st == 2; triggered => { root._st = 0; } }
+
+    property <float> btn-scale: touch.pressed && touch.has-hover ? 0.8 : (root._st == 1 ? 1.05 : 1.0);
+    private property <duration> scale-time: root._st == 1 ? 250ms : root._st == 2 ? 250ms
+        : (touch.pressed && touch.has-hover ? 400ms : 250ms);
+    private property <easing> scale-ease: root._st == 1 ? cubic-bezier(0.28, 1.25, 0.50, 1.0)
+        : root._st == 2 ? ease-out-quart
+        : (touch.pressed && touch.has-hover ? ease-out-quart : ease-out);
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                root._held = true;
+            }
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) {
+                // 在按钮内松开才回弹（按住移出后松开则不弹，与原版一致）
+                if (root._held && self.has-hover) { root._st = 1; }
+                root._held = false;
+            }
+            if (e.kind == PointerEventKind.cancel) { root._held = false; }
+        }
+    }
+
+    // 外层 Border（Background = ColorBrushSemiTransparent）
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: min(self.width, self.height) / 2;
+        background: GlobalTheme.color-semi-transparent;
+
+        // PanBack：圆形背景 + 缩放
+        back := Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: min(self.width, self.height) / 2;
+            background: root.back-color;
+            transform-scale: root.btn-scale;
+            animate background { duration: touch.has-hover ? 120ms : 150ms; }
+            animate transform-scale { duration: root.scale-time; easing: root.scale-ease; }
+
+            // IconHost：Margin=5 → 图标区 = 边长 - 10，居中
+            Image {
+                width: (parent.width - 10px) * root.logo-scale;
+                height: (parent.height - 10px) * root.logo-scale;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: root.icon;
+                colorize: root.icon-color;
+                image-fit: contain;
+                animate colorize { duration: touch.has-hover ? 120ms : 150ms; }
+            }
+        }
+    }
+}

@@ -1,0 +1,249 @@
+import { MyButton, ButtonState } from "components/button.slint";
+import { GlobalTheme } from "theme/theme.slint";
+import { MyCheckBox, TriStateCheckBox } from "components/checkbox.slint";
+import { MyCard } from "components/card.slint";
+import { GridBox, HorizontalBox } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    height: 600px;
+    width: 900px;
+    background: GlobalTheme.background;
+
+    out property <string> state-text: "";
+
+    // 子项状态
+    in-out property <bool> child1_checked: false;
+    in-out property <bool> child2_checked: false;
+    in-out property <bool> child3_checked: false;
+
+    // 计算选中数量
+    private property <int> selected_count:
+        (child1_checked ? 1 : 0)
+        + (child2_checked ? 1 : 0)
+        + (child3_checked ? 1 : 0);
+
+    private property <int> total_count: 3;
+
+    // ---- MyCard dynamic content test state ----
+    private property <int> bar1_count: 1;
+
+    VerticalLayout {
+        spacing: 20px;
+
+        Text {
+            height: 50px;
+            text: root.state-text;
+            font-size: 20px;
+            font-family: GlobalTheme.font-family;
+            color: #323b47;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: 40px;
+            MyButton {
+                text: "普通按钮";
+                button-state: ButtonState.Normal;
+                clicked => { root.state-text = "普通按钮被点击了"; }
+            }
+            MyButton {
+                text: "高亮按钮";
+                button-state: ButtonState.Highlighted;
+                clicked => { root.state-text = "高亮按钮被点击了"; }
+            }
+            MyButton {
+                text: "红色按钮";
+                button-state: ButtonState.Red;
+                clicked => { root.state-text = "红色按钮被点击了"; }
+            }
+            MyButton {
+                text: "禁停按钮";
+                button-state: ButtonState.Disabled;
+                clicked => { root.state-text = "? 你咋触发的这个"; }
+            }
+        }
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 40px;
+            alignment: start;
+
+            HorizontalBox {
+                spacing: 10px;
+                TriStateCheckBox {
+                    text: "全选 / 部分选中";
+                    total: root.total_count;
+                    selected: root.selected_count;
+                    toggle_all => {
+                        if (root.selected_count == root.total_count) {
+                            root.child1_checked = false;
+                            root.child2_checked = false;
+                            root.child3_checked = false;
+                            root.state-text = "父级: 未选中";
+                        } else {
+                            root.child1_checked = true;
+                            root.child2_checked = true;
+                            root.child3_checked = true;
+                            root.state-text = "父级: 全选";
+                        }
+                    }
+                }
+                MyCheckBox {
+                    text: "选项 A";
+                    checked <=> root.child1_checked;
+                    clicked => { root.state-text = "A: " + (root.child1_checked ? "选中" : "未选中"); }
+                }
+                MyCheckBox {
+                    text: "选项 B";
+                    checked <=> root.child2_checked;
+                    clicked => { root.state-text = "B: " + (root.child2_checked ? "选中" : "未选中"); }
+                }
+                MyCheckBox {
+                    text: "选项 C";
+                    checked <=> root.child3_checked;
+                    clicked => { root.state-text = "C: " + (root.child3_checked ? "选中" : "未选中"); }
+                }
+            }
+
+            // ===== MyCard with dynamic content (matching previous CollapseBar test) =====
+            card := MyCard {
+                title: "动态内容测试 - 点击展开";
+                can-swap: true;
+                width: 500px;
+
+                toggled => {
+                    root.state-text = card.is-swapped ? "已折叠" : "已展开";
+                }
+
+                VerticalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "这是折叠面板内的内容。";
+                        font-size: GlobalTheme.font-size;
+                        font-family: GlobalTheme.font-family;
+                        height: 20px;
+                        color: #555555;
+                    }
+                    Text {
+                        text: "下面有按钮可以动态追加内容。";
+                        font-size: GlobalTheme.font-size;
+                        font-family: GlobalTheme.font-family;
+                        height: 20px;
+                        color: #555555;
+                    }
+
+                    MyButton {
+                        text: "追加一段文字";
+                        button-state: ButtonState.Normal;
+                        height: 20px;
+                        clicked => {
+                            root.state-text = "按钮1被点击，bar1_count=" + (root.bar1_count + 1);
+                            root.bar1_count += 1;
+                        }
+                    }
+
+                    if root.bar1_count >= 2 : Rectangle {
+                        Text {
+                            text: "✓ 第1次追加：你好！这是动态插入的文字。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                    if root.bar1_count >= 3 : Rectangle {
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "✓ 第2次追加：这里有个新按钮 →";
+                                font-size: GlobalTheme.font-size;
+                                font-family: GlobalTheme.font-family;
+                                height: 20px;
+                                width: 240px;
+                                color: #333333;
+                                vertical-alignment: center;
+                            }
+                            MyButton {
+                                text: "嵌套按钮";
+                                button-state: ButtonState.Highlighted;
+                                clicked => {
+                                    root.state-text = "嵌套按钮被点击，bar1_count=" + (root.bar1_count + 1);
+                                    root.bar1_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    if root.bar1_count >= 4 : Rectangle {
+                        Text {
+                            text: "✓ 第3次追加：继续点按钮可以一直追加下去。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                    if root.bar1_count >= 5 : Rectangle {
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text {
+                                text: "✓ 第4次追加：第5个按钮又来啦 →";
+                                font-size: GlobalTheme.font-size;
+                                font-family: GlobalTheme.font-family;
+                                height: 20px;
+                                width: 240px;
+                                color: #333333;
+                                vertical-alignment: center;
+                            }
+                            MyButton {
+                                text: "点我继续";
+                                button-state: ButtonState.Highlighted;
+                                clicked => {
+                                    root.state-text = "按钮5点击，bar1_count=" + (root.bar1_count + 1);
+                                    root.bar1_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    if root.bar1_count >= 6 : Rectangle {
+                        Text {
+                            text: "✓ 第5次追加：可以看到折叠板会根据内容自动扩展高度。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                    if root.bar1_count >= 7 : Rectangle {
+                        Text {
+                            text: "✓ 继续追加，动画应该流畅。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                    if root.bar1_count >= 8 : Rectangle {
+                        Text {
+                            text: "✓ 第7条动态内容。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                    if root.bar1_count >= 9 : Rectangle {
+                        Text {
+                            text: "✓ 第8条动态内容。够了，这足以验证动态扩展。";
+                            font-size: GlobalTheme.font-size;
+                            font-family: GlobalTheme.font-family;
+                            height: 20px;
+                            color: #333333;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

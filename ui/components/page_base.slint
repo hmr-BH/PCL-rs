@@ -1,0 +1,415 @@
+// PCL-rs 页面基座 — 1:1 移植 PCL-CE MyPageLeft / MyPageRight（Controls/MyPageLeft.cs / MyPageRight.cs）
+//
+// 右页（PclPageRight）状态机（原版 PageStates）：
+//   Empty → ContentEnter → ContentStay → ContentExit → (重新 Enter)
+//   Empty → LoaderWait --400ms--> LoaderEnter → LoaderStayForce --400ms--> LoaderStay
+//   LoaderStay 且加载完成 → LoaderExit → ContentEnter
+//   任意显示态 → PageExit → Empty；PageOnForceExit 立即回 Empty。
+//   加载中进入页面先空等 400ms（LoaderWait），加载器失败直接进 LoaderEnter 显示错误。
+//
+// 逐项进入动画（原版 TriggerEnterAnimation，由 PclAnimItem 逐项驱动）：
+//   每项 opacity 0→1 100ms OutFluent(Weak)=ease-out-quad；
+//   Y -16→0 由两条并发动画叠加：+5（250ms OutFluent(Middle)≈cubic-bezier(0.215,0.61,0.355,1.0)）
+//   与 +11（350ms OutBack=cubic-bezier(0.28,1.25,0.50,1.0)）；
+//   逐项 stagger delay += 25ms。
+// 逐项退出动画（TriggerExitAnimation）：opacity→0 70ms + Y -6 70ms，stagger 15ms。
+//
+// 左页（PclPageLeft）：
+//   整体模式：scale 0.96→1 OutBack(Weak) + opacity 0→1 100ms；
+//             退出 scale→0.95 110ms InFluent(Weak)=ease-in-quad + opacity→0 80ms delay 30。
+//   逐项模式（AnimatedControl != null 等价）：X -25→0（+5 200ms OutFluent(Middle)≈cubic-bezier(0.215,0.61,0.355,1.0)
+//             + +20 300ms OutBack），opacity→1（TextBlock 类为 0.6，用 target-opacity），
+//             进入 stagger = max(15-i,7)*2 ms；退出 opacity→0 + X -6 各 50ms。
+//
+// 用法（右页）：
+//   PclPageRight {
+//       has-loader: true; loader-loading: Api.loading; stagger-count: 2;
+//       PclAnimItem { phase: parent.anim-phase; stagger-index: 0; MyCard { ... } }
+//       PclAnimItem { phase: parent.anim-phase; stagger-index: 1; MyCard { ... } }
+//   }
+//   页面切换时调用 page-on-enter() / page-on-exit()；返回顶部调用 back-to-top()。
+//
+// 已知偏差：
+//   - Slint 无法枚举 @children，逐项动画需页面用 PclAnimItem 包装每个卡片并传 stagger-index；
+//     动画总时长由 stagger-count 推算（用于状态机定时器）。
+//   - 原版 panAlways（常显容器）未单列槽位，常显内容可放在 PclPageRight 之外的叠加层。
+//   - 原版滚动条滑入动画（TranslateX 10→0 350ms）未移植（Slint Flickable 无独立滚动条元素）。
+//   - 左页退出 stagger 原版按 70ms/N 均摊，此处统一每项 15ms。
+//   - LoaderWait 期间原版页面完全空白，此处相同（加载面板 400ms 后才入场）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyLoading, MyLoadingState } from "loading.slint";
+
+// 右页状态（对应原版 MyPageRight.PageStates）
+export enum PclPageState {
+    Empty,
+    LoaderWait,
+    LoaderEnter,
+    LoaderStayForce,
+    LoaderStay,
+    LoaderExit,
+    ContentEnter,
+    ContentStay,
+    ContentExit,
+    PageExit,
+}
+
+// ==========================================================================
+// PclAnimItem — 逐项动画包装（右页竖向 Y / 左页横向 X）
+//   phase: 0=隐藏 1=进入 2=退出（由页面基座的 anim-phase 驱动）
+// ==========================================================================
+
+export component PclAnimItem {
+    in property <int> stagger-index: 0;
+    in property <int> phase: 0;
+    in property <bool> horizontal: false;    // 左页 X 向动画
+    in property <float> target-opacity: 1;   // 左页 TextBlock 类为 0.6
+    in property <int> exit-stagger: 15;      // 逐项退出 stagger（ms/项）
+    in property <length> fixed-height: 0px;  // >0 时固定高度（用于加载面板等）
+
+    // 进入 stagger：右页 i*25；左页 max(15-i,7)*2（原版公式）
+    property <int> enter-delay: root.horizontal
+        ? Math.max(15 - root.stagger-index, 7) * 2
+        : root.stagger-index * 25;
+
+    property <int> applied: 0;   // 0 隐藏 / 1 已进入 / 2 已退出
+    enter-timer := Timer {
+        interval: root.enter-delay * 1ms;
+        running: root.phase == 1 && root.applied == 0;
+        triggered => { root.applied = 1; }
+    }
+    exit-timer := Timer {
+        interval: root.exit-stagger * root.stagger-index * 1ms;
+        running: root.phase == 2 && root.applied == 1;
+        triggered => { root.applied = 2; }
+    }
+    changed phase => {
+        if root.phase == 0 { root.applied = 0; }
+    }
+
+    property <bool> shown: root.applied == 1;
+    property <bool> gone: root.applied == 2;
+
+    // 进入：opacity（100ms ease-out-quad）
+    property <float> op-in: root.shown ? 1 : 0;
+    animate op-in { duration: 100ms; easing: ease-out-quad; }
+    // 进入：位移段 1（右 +5/250ms、左 +5/200ms，OutFluent(Middle)）
+    property <float> d1: root.shown ? 5 : 0;
+    animate d1 { duration: root.horizontal ? 200ms : 250ms; easing: cubic-bezier(0.215, 0.61, 0.355, 1.0); }
+    // 进入：位移段 2（右 +11/350ms、左 +20/300ms，OutBack(Weak)）
+    property <float> d2: root.shown ? (root.horizontal ? 20 : 11) : 0;
+    animate d2 { duration: root.horizontal ? 300ms : 350ms; easing: cubic-bezier(0.28, 1.25, 0.50, 1.0); }
+    // 退出：opacity（右 70ms / 左 50ms，线性）
+    property <float> op-out: root.gone ? 0 : 1;
+    animate op-out { duration: root.horizontal ? 50ms : 70ms; }
+    // 退出：位移 -6（右 70ms / 左 50ms，线性）
+    property <float> d-exit: root.gone ? -6 : 0;
+    animate d-exit { duration: root.horizontal ? 50ms : 70ms; }
+
+    property <length> off: (root.horizontal ? (-25 + root.d1 + root.d2) : (-16 + root.d1 + root.d2 + root.d-exit)) * 1px;
+    property <length> off-x: root.d-exit * 1px;
+
+    width: 100%;
+    height: root.fixed-height > 0px ? root.fixed-height : self.preferred-height;
+
+    container := Rectangle {
+        x: root.horizontal ? root.off : root.off-x;
+        y: root.horizontal ? 0px : root.off;
+        width: 100%;
+        height: 100%;
+        opacity: root.op-in * root.op-out * root.target-opacity;
+        @children
+    }
+}
+
+// ==========================================================================
+// PclPageRight — 右页基座（加载器状态机 + Flickable 内容区 + 逐项动画编排）
+// ==========================================================================
+
+export component PclPageRight {
+    // ---- 加载器 ----
+    in property <bool> has-loader: false;
+    in property <bool> loader-loading: false;      // 加载器运行中
+    in property <bool> loader-failed: false;       // 加载器失败
+    in property <string> loader-text: "加载中...";
+    in property <string> loader-error-text: "加载失败";
+    in property <bool> loader-show-progress: false;
+    in property <float> loader-progress: 0;
+    // ---- 内容与布局 ----
+    in property <int> stagger-count: 1;            // 内容区 PclAnimItem 数量（推算动画结束）
+    in property <length> page-padding-h: 20px;     // 页面左右 padding
+    in property <length> page-padding-top: 20px;
+    in property <length> page-padding-bottom: 8px;
+    in property <length> page-spacing: 15px;       // 卡片间距
+    // ---- 输出 ----
+    out property <int> anim-phase: 0;              // 传给各 PclAnimItem.phase
+    out property <PclPageState> page-state: PclPageState.Empty;
+    out property <length> scroll-y: flick.viewport-y;
+    // ---- 事件 ----
+    callback page-enter();
+    callback page-exit();
+    callback loader-retry();                       // 失败状态点击加载图标
+
+    // ---- 面板可见性：0 无 / 1 内容 / 2 加载 ----
+    property <int> visible-pane: 0;
+    property <int> loader-phase: 0;                // 加载面板自身的动画相位
+
+    // 动画时长估算（进入：stagger*25 + 350；退出：stagger*15 + 70；+40ms 余量）
+    property <int> content-enter-ms: (root.stagger-count - 1) * 25 + 390;
+    property <int> content-exit-ms: (root.stagger-count - 1) * 15 + 110;
+    property <int> loader-enter-ms: 390;
+    property <int> loader-exit-ms: 110;
+
+    // ================= 状态机 =================
+
+    // 进入内容
+    function enter-content() {
+        root.visible-pane = 1;
+        root.anim-phase = 1;
+        root.page-state = PclPageState.ContentEnter;
+    }
+    // 进入加载面板
+    function enter-loader() {
+        root.visible-pane = 2;
+        root.loader-phase = 1;
+        root.page-state = PclPageState.LoaderEnter;
+    }
+
+    // 需要切换到本页面（原版 PageOnEnter）
+    public function page-on-enter() {
+        if root.page-state != PclPageState.Empty && root.page-state != PclPageState.ContentExit {
+            return;
+        }
+        root.page-enter();
+        if !root.has-loader || (!root.loader-loading && !root.loader-failed) {
+            root.enter-content();
+        } else if root.loader-loading {
+            root.visible-pane = 0;
+            root.page-state = PclPageState.LoaderWait;
+        } else {
+            root.enter-loader();
+        }
+    }
+
+    // 需要离开本页面（原版 PageOnExit）
+    public function page-on-exit() {
+        if root.page-state == PclPageState.Empty || root.page-state == PclPageState.PageExit {
+            return;
+        }
+        root.page-exit();
+        root.page-state = PclPageState.PageExit;
+        if root.visible-pane == 1 { root.anim-phase = 2; }
+        if root.visible-pane == 2 { root.loader-phase = 2; }
+    }
+
+    // 强制离场（原版 PageOnForceExit）：立即隐藏，停掉所有动画定时器
+    public function page-on-force-exit() {
+        root.page-state = PclPageState.Empty;
+        root.visible-pane = 0;
+        root.anim-phase = 0;
+        root.loader-phase = 0;
+    }
+
+    // 子页面内容更换（原版 PageOnContentExit）：内容退出后重新 Enter
+    public function page-on-content-exit() {
+        if root.page-state == PclPageState.ContentEnter || root.page-state == PclPageState.ContentStay {
+            root.page-state = PclPageState.ContentExit;
+            root.anim-phase = 2;
+        } else if root.page-state == PclPageState.LoaderEnter
+               || root.page-state == PclPageState.LoaderStayForce
+               || root.page-state == PclPageState.LoaderStay {
+            root.page-state = PclPageState.ContentExit;
+            root.loader-phase = 2;
+        } else if root.page-state == PclPageState.LoaderWait || root.page-state == PclPageState.Empty {
+            root.page-on-enter();
+        }
+    }
+
+    // 返回顶部（原版"返回顶部"按钮滚动 PanScroll）
+    public function back-to-top() {
+        flick.viewport-y = 0px;
+    }
+
+    // ---- LoaderWait：400ms 空等后进入加载面板 ----
+    Timer {
+        interval: 400ms;
+        running: root.page-state == PclPageState.LoaderWait;
+        triggered => { root.enter-loader(); }
+    }
+    // ---- 内容进入完成 → ContentStay ----
+    Timer {
+        interval: root.content-enter-ms * 1ms;
+        running: root.page-state == PclPageState.ContentEnter;
+        triggered => { root.page-state = PclPageState.ContentStay; }
+    }
+    // ---- 加载面板进入完成 → LoaderStayForce（强制再等 400ms）----
+    Timer {
+        interval: root.loader-enter-ms * 1ms;
+        running: root.page-state == PclPageState.LoaderEnter;
+        triggered => { root.page-state = PclPageState.LoaderStayForce; }
+    }
+    Timer {
+        interval: 400ms;
+        running: root.page-state == PclPageState.LoaderStayForce;
+        triggered => {
+            if !root.loader-loading && !root.loader-failed {
+                root.page-state = PclPageState.LoaderExit;
+                root.loader-phase = 2;
+            } else {
+                root.page-state = PclPageState.LoaderStay;
+            }
+        }
+    }
+    // ---- 加载面板退出完成 → ContentEnter ----
+    Timer {
+        interval: root.loader-exit-ms * 1ms;
+        running: root.page-state == PclPageState.LoaderExit;
+        triggered => { root.enter-content(); }
+    }
+    // ---- 退出完成：PageExit → Empty；ContentExit → 重新 Enter ----
+    Timer {
+        interval: root.content-exit-ms * 1ms;
+        running: root.page-state == PclPageState.PageExit || root.page-state == PclPageState.ContentExit;
+        triggered => {
+            if root.page-state == PclPageState.PageExit {
+                root.page-state = PclPageState.Empty;
+                root.visible-pane = 0;
+                root.anim-phase = 0;
+                root.loader-phase = 0;
+            } else {
+                root.page-on-enter();
+            }
+        }
+    }
+
+    // ---- 加载器状态变化（原版 PageLoaderState）----
+    changed loader-loading => {
+        if root.loader-loading || root.loader-failed {
+            // （重新）开始运行：内容 → ContentExit
+            if root.page-state == PclPageState.ContentEnter || root.page-state == PclPageState.ContentStay {
+                root.page-state = PclPageState.ContentExit;
+                root.anim-phase = 2;
+            }
+        } else {
+            // 运行结束：LoaderWait 直接进内容；LoaderStay 先退出加载面板
+            if root.page-state == PclPageState.LoaderWait {
+                root.enter-content();
+            } else if root.page-state == PclPageState.LoaderStay {
+                root.page-state = PclPageState.LoaderExit;
+                root.loader-phase = 2;
+            }
+        }
+    }
+    changed loader-failed => {
+        if root.loader-failed
+            && (root.page-state == PclPageState.ContentEnter || root.page-state == PclPageState.ContentStay) {
+            root.page-state = PclPageState.ContentExit;
+            root.anim-phase = 2;
+        }
+    }
+
+    // ================= 布局 =================
+
+    // 加载面板（MyLoading 居中，点击重试）
+    loader-pane := Rectangle {
+        width: 100%;
+        height: 100%;
+        visible: root.visible-pane == 2;
+        PclAnimItem {
+            phase: root.loader-phase;
+            stagger-index: 0;
+            fixed-height: root.height;
+            MyLoading {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                state: root.loader-failed ? MyLoadingState.Error : MyLoadingState.Run;
+                text: root.loader-text;
+                text-error: root.loader-error-text;
+                show-progress: root.loader-show-progress;
+                progress: root.loader-progress;
+                clicked => { if root.loader-failed { root.loader-retry(); } }
+            }
+        }
+    }
+
+    // 内容面板（滚动 + 卡片列表）
+    flick := Flickable {
+        width: 100%;
+        height: 100%;
+        visible: root.visible-pane == 1;
+        interactive: root.visible-pane == 1;
+        animate viewport-y { duration: 250ms; easing: ease-out; }
+        VerticalLayout {
+            padding-left: root.page-padding-h;
+            padding-right: root.page-padding-h;
+            padding-top: root.page-padding-top;
+            padding-bottom: root.page-padding-bottom;
+            spacing: root.page-spacing;
+            @children
+        }
+    }
+}
+
+// ==========================================================================
+// PclPageLeft — 左页基座（导航面板；整体缩放 或 逐项 X 动画）
+// ==========================================================================
+
+export component PclPageLeft {
+    in property <bool> stagger-children: true;   // 对应原版 AnimatedControl != null
+    in property <int> stagger-count: 1;
+    out property <int> anim-phase: 0;            // 传给各 PclAnimItem.phase（horizontal: true）
+    callback shown();
+    callback hidden();
+
+    property <bool> whole-shown: false;
+    property <bool> whole-hiding: false;
+
+    // 触发进入（原版 TriggerShowAnimation）
+    public function trigger-show() {
+        if root.stagger-children {
+            root.anim-phase = 1;
+        } else {
+            root.whole-hiding = false;
+            root.whole-shown = true;
+        }
+    }
+    // 触发退出（原版 TriggerHideAnimation）
+    public function trigger-hide() {
+        if root.stagger-children {
+            root.anim-phase = 2;
+        } else {
+            root.whole-hiding = true;
+        }
+    }
+
+    // 进入/退出完成通知（时长估算）
+    Timer {
+        interval: (Math.max(15 - root.stagger-count + 1, 7) * 2 * root.stagger-count + 340) * 1ms;
+        running: root.stagger-children && root.anim-phase == 1;
+        triggered => { root.shown(); }
+    }
+    Timer {
+        interval: (15 * root.stagger-count + 90) * 1ms;
+        running: root.stagger-children && root.anim-phase == 2;
+        triggered => { root.hidden(); }
+    }
+
+    // 整体模式动画（scale 0.96→1 OutBack(Weak)；退出 0.95 110ms ease-in-quad）
+    property <float> whole-scale: root.whole-hiding ? 0.95 : (root.whole-shown ? 1 : 0.96);
+    animate whole-scale {
+        duration: root.whole-hiding ? 110ms : 280ms;
+        easing: root.whole-hiding ? ease-in-quad : cubic-bezier(0.28, 1.25, 0.50, 1.0);
+    }
+    property <float> whole-op-in: root.whole-shown ? 1 : 0;
+    animate whole-op-in { duration: 100ms; }
+    property <float> whole-op-out: root.whole-hiding ? 0 : 1;
+    animate whole-op-out { duration: 80ms; delay: 30ms; }
+
+    container := Rectangle {
+        width: 100%;
+        height: 100%;
+        opacity: root.stagger-children ? 1 : root.whole-op-in * root.whole-op-out;
+        transform-scale: root.stagger-children ? 1 : root.whole-scale;
+        @children
+    }
+}

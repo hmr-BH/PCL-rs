@@ -1,0 +1,95 @@
+// ==========================================================================
+// PCL-rs 实例选择行 —— 1:1 移植 PCL-CE 实例选择页的实例项
+//   原版文件：Pages/PageSelectRight.xaml.cs（McVersionListItem / McVersionListContent）
+//
+// 结构（原版 MyListItem, Type=Clickable, Height=42）：
+//   位图 Logo（实例 Logo.png，加载失败回退 RedstoneBlock.png，由 Rust 侧提供）；
+//   Title = 实例名；Info = 实例描述 (mcInstance.Desc)；
+//   Tags = [原版版本号, "Forge x.x", "Fabric x.x", ...]（原版 MyListItem.Tags 灰 chip）；
+//   右侧 4 个 25×25 MyIconButton（悬停淡入）：
+//     收藏 heart/heart-filled（LogoScale 1.1）、打开文件夹 folder-open（1.1）、
+//     删除 trash-2（1.1）、设置 settings（1.1）；
+//   点击 → 选中并返回启动页；右键 → 进入实例设置页。
+//   错误实例（McInstanceState.Error）：第 4 按钮变为 folder-open（LogoScale 1.15），
+//     右键 → 打开文件夹；其余按钮不变。
+//
+// 已知偏差：
+//   1. 错误态第 4 按钮的图标切换由 data.error 驱动（settings → folder-open），
+//      点击仍统一走 settings-clicked 回调，由宿主按 error 状态分派；
+//   2. 右键统一抛 right-clicked，由宿主按 error 状态决定进设置页或打开文件夹；
+//   3. ToolTip（收藏/打开文件夹/删除/实例设置）未移植（Slint 无原生 tooltip 层）；
+//   4. 拖拽排序原版不存在（无拖拽交互），未实现；
+//   5. data.hidden 仅作数据透传（原版隐藏实例按卡片分组，行外观无差异）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+import { ListRowBase, VersionTag, TagKind } from "row_base.slint";
+
+// 实例行数据
+export struct InstanceItemData {
+    icon: image,            // 实例 Logo 位图
+    name: string,           // 实例名
+    info: string,           // 实例描述
+    tags: [VersionTag],     // 版本/加载器标签（原版为灰 chip）
+    starred: bool,          // 已收藏（heart-filled）
+    hidden: bool,           // 已隐藏（仅数据透传，见偏差 5）
+    error: bool,            // 错误实例（McInstanceState.Error）
+}
+
+export component InstanceItem {
+    in property <InstanceItemData> data;
+    in property <bool> enabled: true;
+
+    callback clicked();               // 点击（选中实例并返回启动页）
+    callback right-clicked();         // 右键（常态=实例设置；错误态=打开文件夹）
+    callback star-clicked();          // 收藏/取消收藏
+    callback open-folder-clicked();   // 打开实例文件夹
+    callback delete-clicked();        // 删除实例
+    callback settings-clicked();      // 实例设置（错误态时宿主应改为打开文件夹）
+
+    row := ListRowBase {
+        width: 100%;
+        icon: root.data.icon;
+        title: root.data.name;
+        info: root.data.info;
+        tags: root.data.tags;
+        enabled: root.enabled;
+        trailing-buttons: 4;
+        clicked => { root.clicked(); }
+        right-clicked => { root.right-clicked(); }
+
+        // 收藏（heart-filled / heart，LogoScale 1.1）
+        MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: root.data.starred
+                ? @image-url("../assets/icons/lucide/heart-filled.svg")
+                : @image-url("../assets/icons/lucide/heart.svg");
+            logo-scale: 1.1;
+            clicked => { root.star-clicked(); }
+        }
+        // 打开文件夹（folder-open，LogoScale 1.1）
+        MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/folder-open.svg");
+            logo-scale: 1.1;
+            clicked => { root.open-folder-clicked(); }
+        }
+        // 删除（trash-2，LogoScale 1.1）
+        MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/trash-2.svg");
+            logo-scale: 1.1;
+            clicked => { root.delete-clicked(); }
+        }
+        // 设置（settings，LogoScale 1.1）；错误态 = folder-open（LogoScale 1.15）
+        MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: root.data.error
+                ? @image-url("../assets/icons/lucide/folder-open.svg")
+                : @image-url("../assets/icons/lucide/settings.svg");
+            logo-scale: root.data.error ? 1.15 : 1.1;
+            clicked => { root.settings-clicked(); }
+        }
+    }
+}

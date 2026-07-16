@@ -1,0 +1,85 @@
+// ==========================================================================
+// PCL-rs 版本下载行 —— 1:1 移植 PCL-CE 游戏版本 & 加载器版本下载项
+//   原版文件：Pages/PageDownload/ModDownloadLib.cs
+//     （McDownloadListItem / ForgeDownloadListItem / NeoForgeDownloadListItem /
+//       FabricDownloadListItem / OptiFineDownloadListItem）
+//
+// 结构（原版 MyListItem, Type=Clickable, Height=42）：
+//   位图 Logo（按版本/加载器类型：release=Grass、snapshot=CommandBlock、
+//     special=GoldBlock、其它=CobbleStone；Fabric/NeoForge/OptiFine 各有专属图）；
+//   Title = 版本号（格式化后）；Info = "发布日期 | 原始 id" 或
+//     "稳定版/预览版/推荐版/最新版  |  发布日期" 等组合文本（由 Rust 侧拼好）；
+//   Tags = 灰 chip（原版仅 UVMC 源版本使用），可空；
+//   右侧 25×25 MyIconButton（悬停淡入），按页面变体：
+//     客户端完整菜单：save + info + server（另存为 / 更新日志 / 下载服务端）；
+//     客户端仅保存：server + info；Forge/NeoForge/OptiFine：save + info；
+//     Fabric：仅 info。按钮显示由 show-save / show-info / show-server 控制。
+//   点击 → 选中该版本（进入安装流程）。
+//
+// 已知偏差：
+//   1. 按钮顺序固定为 save → info → server（原版"客户端仅保存"变体为
+//      server → info，顺序略有不同；Fabric 仅 info 与之一致）；
+//   2. 原版无"已安装"标记与"最新"图标（最新/推荐等状态均拼入 Info 文本），
+//      故无 installed / newest 字段；
+//   3. ToolTip（另存为/更新日志/下载服务端）未移植。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+import { ListRowBase, VersionTag, TagKind } from "row_base.slint";
+
+// 版本行数据
+export struct VersionItemData {
+    icon: image,            // 版本/加载器类型位图
+    version: string,        // 版本号（Title）
+    info: string,           // 信息文本（"发布日期 | id"、"稳定版  |  日期" 等）
+    tags: [VersionTag],     // 标签 chips（原版仅 UVMC 源使用），可空
+}
+
+export component VersionItem {
+    in property <VersionItemData> data;
+    in property <bool> enabled: true;
+    // 按钮显示开关（默认 = 客户端完整菜单 save+info+server）
+    in property <bool> show-save: true;
+    in property <bool> show-info: true;
+    in property <bool> show-server: true;
+
+    callback clicked();          // 点击（选中版本）
+    callback save-clicked();     // 另存为（lucide/save）
+    callback info-clicked();     // 更新日志（lucide/info）
+    callback server-clicked();   // 下载服务端（lucide/server）
+
+    property <int> _btn-count: (root.show-save ? 1 : 0)
+        + (root.show-info ? 1 : 0) + (root.show-server ? 1 : 0);
+
+    row := ListRowBase {
+        width: 100%;
+        icon: root.data.icon;
+        title: root.data.version;
+        info: root.data.info;
+        tags: root.data.tags;
+        enabled: root.enabled;
+        trailing-buttons: root._btn-count;
+        clicked => { root.clicked(); }
+
+        // 另存为（lucide/save，LogoScale 默认 1.0）
+        if root.show-save : MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/save.svg");
+            clicked => { root.save-clicked(); }
+        }
+        // 更新日志（lucide/info，LogoScale 1.05）
+        if root.show-info : MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/info.svg");
+            logo-scale: 1.05;
+            clicked => { root.info-clicked(); }
+        }
+        // 下载服务端（lucide/server，LogoScale 1.0）
+        if root.show-server : MyIconButton {
+            self-width: 25px; self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/server.svg");
+            clicked => { root.server-clicked(); }
+        }
+    }
+}

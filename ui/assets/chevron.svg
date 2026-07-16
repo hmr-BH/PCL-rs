@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 16">
+  <!-- Rotated 180° from the original PCL geometry so that a 180° Slint rotation
+       points the chevron down (expanded state), matching WPF MyCard/MyCollapseBar. -->
+  <path d="M18,12 l2,-2 -10,-10 -10,10 2,2 8,-8 8,8 z" fill="#343d4a"/>
+</svg>

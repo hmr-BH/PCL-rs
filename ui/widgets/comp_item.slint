@@ -1,0 +1,432 @@
+// PCL-rs 资源搜索结果项 — 1:1 移植 PCL-CE MyCompItem
+//   原版文件：Pages/PageDownload/Comp/MyCompItem.xaml + .xaml.cs
+//             （填充逻辑见 Modules/Minecraft/ModComp.cs 的 CompProject.ToCompItem）
+//
+// 结构（原版 Grid，高 64，Background=ColorBrushSemiTransparent）：
+//   列：7 | 50(Logo) | 8 | Auto(标题/Tag) | 1*(描述/下边栏) | Auto(按钮列)
+//   行：1* | 20(标题) | 18(Tag/描述) | 16(下边栏) | 1.1*  → 上留白 ≈4.76px、下留白 ≈5.24px
+//   Logo 50×50 圆角 6 裁切，位于 (7, ≈6.76)；标题 14px ColorBrush1 + 副标题 12px Gray1 opacity 0.4；
+//   Tag  chips：底 #11000000、前景 #868686、11px、Padding 3,1、圆角 3、右间距 3（原版 Tags setter）；
+//   描述 LabInfo：12px Gray3(#8c8c8c)，字符省略；
+//   下边栏 12px 图标+文字：版本 lucide/layout-list Gray3、下载 lucide/download Gray4、
+//     更新 lucide/arrow-up-from-line Gray4、来源 lucide/globe Gray4（CurseForge/Modrinth），
+//     组间 3 个 0.25* 弹簧列均分剩余宽度；
+//   右侧按钮列（常占宽：快速下载 25+4 + 收藏 25 + 右边距 5）：悬停淡入，
+//     收藏图标按状态 lucide/heart ↔ heart-filled。
+//
+// 关键动画（RefreshColor）：
+//   RectBack：圆角 3、1px ColorBrush6 边；悬停 120ms 底→ColorBrushBg1（按下 ColorBrush6）、
+//     opacity 0→1（OutFluent）、scale 0.996→1（144ms）；离开 180ms 还原（底回 ColorBrush7）；
+//   按钮列 opacity：淡入 42ms(delay 18ms)，淡出 72ms；
+//   无整项按下缩放（原版仅 RectBack 0.996）。
+// 交互：左键 clicked()；右键 right-clicked(x, y)（原版收藏页右键进详情）；
+//   收藏钮 favorite-toggled()（原版弹 CompFavorites.ShowMenu）；快速下载钮 download-clicked()。
+//   与原版一致：按钮区域（即使按钮未淡入）不触发整项点击（原版 _IsClickOnActionButton 坐标判定）。
+//
+// 实现说明（事件分层）：
+//   Slint 中最上层 TouchArea 会拦截其覆盖区域的全部事件，若右侧按钮用真实子组件
+//   置于顶层，则整项 TouchArea 在按钮上方会收不到悬停（hover 视觉断裂），置于下层则按钮点不到。
+//   因此采用与原版相同的"单一 TouchArea + 坐标命中判定"方案（原版 Button_MouseDown 即如此），
+//   按钮为纯视觉 ItemHoverButton（MyIconButton Color 主题的 25×25 简化复刻）。
+//
+// 已知偏差：
+//   - Tag 颜色：原版统一灰色（#11000000/#868686）；此处保留灰色为默认，
+//     另按任务要求提供 CompTagColor 彩色扩展（蓝色 = 原版注释掉的设计稿 ColorBrush6/ColorBrush2 风格）。
+//   - 原版搜索结果项没有"已安装/已下载"状态徽标，故无对应字段。
+//   - Logo 由 data.icon 传入（原版为网络图 + NoIcon.png 兜底），无图标时显示 color8 底。
+//   - 版本/时间等 SharedSizeGroup 跨项对齐未复制（各列按内容自适应）。
+//   - 描述被截断时的悬停 ToolTip 未移植（Slint 侧由宿主页面统一处理）。
+//   - 无标签时描述左缩进与原版差 1px（原版 PanTags Margin -1,0,1,0 已按有标签场景还原）。
+//   - RectBack scale 统一 150ms ease-out（原版 144ms OutFluent）；按钮回弹序列与 MyIconButton 一致。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 来源站点（原版 LabSource：FromCurseForge ? "CurseForge" : "Modrinth"）
+export enum CompSourceKind {
+    CurseForge,
+    Modrinth,
+}
+
+// Tag 颜色种类（原版仅 Gray；其余为扩展，见文件头偏差说明）
+export enum CompTagColor {
+    Gray,
+    Blue,
+    Red,
+    Yellow,
+    Green,
+}
+
+// 单个 Tag chip 数据
+export struct CompTagData {
+    text: string,
+    color: CompTagColor,
+}
+
+// MyCompItem 数据模型（所有显示字段由宿主/Rust 侧填充，对应 ToCompItem 的赋值）
+export struct CompItemData {
+    icon: image,            // 资源图标（50×50 显示，圆角 6 裁切）
+    title: string,          // 标题（GetControlTitle 的 Key，译名/原名）
+    subtitle: string,       // 副标题（GetControlTitle 的 Value，如 "  |  Fabric"），空则隐藏
+    description: string,    // 描述（已去除换行）
+    tags: [CompTagData],    // Tag chips，空则整行只剩描述
+    version-text: string,   // 下边栏版本/加载器描述（空则隐藏版本组，对应原版列宽归零）
+    downloads: string,      // 下载量缩写文本（Lang.CompactNumber，如 "12.3万"）
+    update-time: string,    // 更新时间（Lang.TimeSpan，如 "3天前"），空则隐藏时间组
+    source: CompSourceKind, // 来源站点
+    favorited: bool,        // 收藏状态（切换 heart / heart-filled 图标）
+}
+
+// ==========================================================================
+// ItemHoverButton — MyIconButton（Color 主题 25×25）的纯视觉简化版
+//   供列表项在"单一 TouchArea + 坐标命中"方案下使用（见 MyCompItem 文件头）。
+//   动画与 MyIconButton 一致：悬停变色 120/150ms；按下 scale→0.8（400ms ease-out-quart）；
+//   松开回弹 1.05（250ms OutBack）→1.0（250ms ease-out-quart）。
+// ==========================================================================
+export component ItemHoverButton {
+    in property <length> size: 25px;
+    in property <image> icon;
+    in property <bool> hovered: false;          // 父项坐标命中结果
+    in property <bool> pressed: false;          // 父项坐标命中 + 左键按下
+    in property <float> icon-opacity: 1.0;      // 原版 BtnUpdate 的 Opacity=0.4 场景
+    in property <brush> normal-color: GlobalTheme.color4;   // Color 主题常态 ColorBrush4
+    in property <brush> hover-color: GlobalTheme.color2;    // Color 主题悬停 ColorBrush2
+
+    width: root.size; height: root.size;
+
+    // ---- 松开回弹状态机（与 MyIconButton 相同）：0 常态 / 1 弹至 1.05 / 2 回落 1.0 ----
+    private property <int> _st: 0;
+    t1 := Timer { interval: 250ms; running: root._st == 1; triggered => { root._st = 2; } }
+    t2 := Timer { interval: 250ms; running: root._st == 2; triggered => { root._st = 0; } }
+    changed pressed => {
+        if !root.pressed && root.hovered { root._st = 1; }
+    }
+
+    property <float> btn-scale: root.pressed && root.hovered ? 0.8 : (root._st == 1 ? 1.05 : 1.0);
+    private property <duration> scale-time: root._st == 1 ? 250ms : root._st == 2 ? 250ms
+        : (root.pressed && root.hovered ? 400ms : 250ms);
+    private property <easing> scale-ease: root._st == 1 ? cubic-bezier(0.28, 1.25, 0.50, 1.0)
+        : root._st == 2 ? ease-out-quart
+        : (root.pressed && root.hovered ? ease-out-quart : ease-out);
+
+    back := Rectangle {
+        width: 100%; height: 100%;
+        border-radius: min(self.width, self.height) / 2;
+        background: GlobalTheme.color-semi-transparent;
+        transform-scale: root.btn-scale;
+        animate transform-scale { duration: root.scale-time; easing: root.scale-ease; }
+
+        Image {
+            width: (parent.width - 10px); height: (parent.height - 10px);
+            x: 5px; y: 5px;
+            source: root.icon;
+            opacity: root.icon-opacity;
+            colorize: root.hovered ? root.hover-color : root.normal-color;
+            image-fit: contain;
+            animate colorize { duration: root.hovered ? 120ms : 150ms; }
+        }
+    }
+}
+
+// ==========================================================================
+// MyCompItem — 资源搜索结果项（Mod/整合包/资源包/光影/存档共用）
+// ==========================================================================
+export component MyCompItem inherits Rectangle {
+    in property <CompItemData> data;
+    in property <bool> enabled: true;               // 对应原版 CanInteraction
+    in property <bool> show-favorite-btn: true;     // 对应原版 ShowFavoriteBtn（默认显示）
+    in property <bool> show-download-btn: false;    // 对应原版 ShowDownloadBtn（默认隐藏）
+
+    callback clicked();                             // 左键点击（原版 Click → 打开详情页）
+    callback right-clicked(length, length);         // 右键抬起（坐标相对于本项）
+    callback favorite-toggled();                    // 收藏按钮点击（原版弹收藏夹菜单）
+    callback download-clicked();                    // 快速下载按钮点击（原版 QuickDownload）
+
+    // ---- 布局常量（原版 Grid 行列换算，见文件头）----
+    property <length> _top: (root.height - 54px) / 2.1;   // 上留白 ≈ 4.76px
+    property <bool> _has-buttons: root.show-favorite-btn || root.show-download-btn;
+    // 按钮列常驻宽度（原版 Auto 列即使 opacity 0 也占位）：下载 25+4，收藏 25，右边距 5
+    property <length> _pad-right: (root.show-download-btn ? 29px : 0px)
+                                + (root.show-favorite-btn ? 25px : 0px)
+                                + (root._has-buttons ? 5px : 0px);
+
+    height: 64px;
+    background: GlobalTheme.color-semi-transparent;
+
+    // ---- 按钮区坐标（供命中判定与视觉定位共用）----
+    property <length> _btn-w: (root.show-download-btn ? 29px : 0px) + (root.show-favorite-btn ? 25px : 0px);
+    property <length> _btn-x: root.width - root._btn-w - 5px;
+    property <length> _btn-y: (root.height - 25px) / 2;
+    property <length> _fav-off: root.show-download-btn ? 29px : 0px;
+
+    // 命中判定：0 无 / 1 快速下载 / 2 收藏（对应原版 _IsClickOnActionButton）
+    function btn-at(px: length, py: length) -> int {
+        if !root._has-buttons { return 0; }
+        if py < root._btn-y || py > root._btn-y + 25px { return 0; }
+        if root.show-download-btn && px >= root._btn-x && px <= root._btn-x + 25px { return 1; }
+        if root.show-favorite-btn && px >= root._btn-x + root._fav-off
+            && px <= root._btn-x + root._fav-off + 25px { return 2; }
+        return 0;
+    }
+    property <int> _hbtn: touch.has-hover ? root.btn-at(touch.mouse-x, touch.mouse-y) : 0;
+    property <int> _pbtn: 0;   // 左键按下时命中的按钮（松开/取消归零）
+    // 原版 isMouseDown 只在"非按钮区域"按下时置位（驱动 RectBack 按下色）
+    property <bool> _main-pressed: touch.pressed && root._pbtn == 0;
+
+    // ---- 悬停底 RectBack（圆角 3、1px ColorBrush6 边）----
+    rect-back := Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        border-radius: 3px;
+        border-width: 1px;
+        border-color: GlobalTheme.color6;
+        background: root._main-pressed ? GlobalTheme.color6
+                  : touch.has-hover ? GlobalTheme.color-bg1 : GlobalTheme.color7;
+        opacity: touch.has-hover ? 1 : 0;
+        transform-scale: root._main-pressed ? 0.996 : (touch.has-hover ? 1.0 : 0.996);
+        animate background { duration: touch.has-hover ? 120ms : 180ms; }
+        animate opacity { duration: touch.has-hover ? 120ms : 180ms; easing: ease-out; }
+        animate transform-scale { duration: 150ms; easing: ease-out; }
+    }
+
+    // ---- Logo（50×50 @ (7, _top+2)，圆角 6 裁切）----
+    logo-clip := Rectangle {
+        x: 7px; y: root._top + 2px;
+        width: 50px; height: 50px;
+        border-radius: 6px;
+        clip: true;
+        background: GlobalTheme.color8;     // 无图标期兜底底色（原版为 NoIcon.png）
+        Image {
+            width: 100%; height: 100%;
+            source: root.data.icon;
+            image-fit: contain;             // 原版 MyImage Stretch=Uniform
+        }
+    }
+
+    // ---- 标题行（行 1，高 20）：标题 14px + 副标题 12px Gray1 opacity 0.4 ----
+    title-box := Rectangle {
+        x: 65px; y: root._top;
+        width: parent.width - 65px - root._pad-right;
+        height: 20px;
+        title-txt := Text {
+            x: 0; y: 0; height: 100%;
+            width: min(self.preferred-width, parent.width);
+            text: root.data.title;
+            font-size: 14px;
+            font-family: GlobalTheme.font-family;
+            color: GlobalTheme.color1;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        sub-txt := Text {
+            x: title-txt.width; y: 0; height: 100%;
+            width: min(self.preferred-width, max(0px, parent.width - title-txt.width));
+            text: root.data.subtitle;
+            font-size: 12px;
+            font-family: GlobalTheme.font-family;
+            color: GlobalTheme.gray1;
+            opacity: 0.4;
+            vertical-alignment: center;
+            overflow: elide;
+            visible: root.data.subtitle != "";
+        }
+    }
+
+    // ---- Tag 与描述行（行 2，高 18）：chips（x=64）+ 描述 12px Gray3 ----
+    tag-row := HorizontalLayout {
+        x: 64px; y: root._top + 20px;
+        width: parent.width - 64px - root._pad-right;
+        height: 18px;
+        spacing: 0;
+
+        // 无标签时补 1px（原版描述从 col4 起点 65 开始）
+        if root.data.tags.length == 0 : Rectangle { width: 1px; }
+
+        for tag in root.data.tags : Rectangle {
+            // chip：宽 = 文字 + 左右各 3 padding，外加右间距 3（原版 Margin 0,0,3,0）
+            width: chip-txt.preferred-width + 6px + 3px;
+            height: 100%;
+            chip-bg := Rectangle {
+                x: 0; y: (parent.height - self.height) / 2;
+                width: parent.width - 3px;
+                height: chip-txt.preferred-height + 2px;
+                border-radius: 3px;
+                background: tag.color == CompTagColor.Blue ? GlobalTheme.color6
+                          : tag.color == CompTagColor.Red ? #15f42b3c
+                          : tag.color == CompTagColor.Yellow ? #18c1840a
+                          : tag.color == CompTagColor.Green ? #1527ae60
+                          : #11000000;    // 原版 Color.FromArgb(17, 0, 0, 0)
+                chip-txt := Text {
+                    x: 3px; y: 1px;
+                    text: tag.text;
+                    font-size: 11px;
+                    font-family: GlobalTheme.font-family;
+                    color: tag.color == CompTagColor.Blue ? GlobalTheme.color2
+                         : tag.color == CompTagColor.Red ? #f42b3c
+                         : tag.color == CompTagColor.Yellow ? #c1840a
+                         : tag.color == CompTagColor.Green ? #27ae60
+                         : #868686;      // 原版 Color.FromRgb(134, 134, 134)
+                }
+            }
+        }
+
+        // 描述（LabInfo）：12px Gray3，字符省略，占满剩余宽度
+        info-wrap := Rectangle {
+            horizontal-stretch: 1;
+            height: 100%;
+            clip: true;
+            info-txt := Text {
+                x: 0; y: 0;
+                width: 100%; height: 100%;
+                text: root.data.description;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray3;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // ---- 下边栏（行 3，高 16）：版本 / 下载 / 更新时间 / 来源，组间 0.25* 弹簧 ----
+    bottom-row := HorizontalLayout {
+        x: 65px; y: root._top + 38px;
+        width: parent.width - 65px - root._pad-right;
+        height: 16px;
+        spacing: 0;
+
+        // 版本组（lucide/layout-list Gray3 + 12px Gray3，Margin 4,0,2,0；空则整组隐藏）
+        if root.data.version-text != "" : Rectangle {
+            width: 12px + 4px + ver-txt.preferred-width + 2px;
+            height: 100%;
+            Image {
+                x: 0; y: 2px; width: 12px; height: 12px;
+                source: @image-url("../assets/icons/lucide/layout-list.svg");
+                colorize: GlobalTheme.gray3;
+                image-fit: contain;
+            }
+            ver-txt := Text {
+                x: 16px; y: 0; height: 100%;
+                text: root.data.version-text;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray3;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { horizontal-stretch: 0.25; }
+
+        // 下载组（lucide/download Gray4 + 12px Gray4，Margin 5,0,2,0）
+        Rectangle {
+            width: 12px + 5px + dl-txt.preferred-width + 2px;
+            height: 100%;
+            Image {
+                x: 0; y: 2px; width: 12px; height: 12px;
+                source: @image-url("../assets/icons/lucide/download.svg");
+                colorize: GlobalTheme.gray4;
+                image-fit: contain;
+            }
+            dl-txt := Text {
+                x: 17px; y: 0; height: 100%;
+                text: root.data.downloads;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray4;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { horizontal-stretch: 0.25; }
+
+        // 更新时间组（lucide/arrow-up-from-line Gray4 Margin 0,0,1,0 + 12px Gray4 Margin 5,0,2,0；空则隐藏）
+        if root.data.update-time != "" : Rectangle {
+            width: 12px + 1px + 5px + time-txt.preferred-width + 2px;
+            height: 100%;
+            Image {
+                x: 0; y: 2px; width: 12px; height: 12px;
+                source: @image-url("../assets/icons/lucide/arrow-up-from-line.svg");
+                colorize: GlobalTheme.gray4;
+                image-fit: contain;
+            }
+            time-txt := Text {
+                x: 18px; y: 0; height: 100%;
+                text: root.data.update-time;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray4;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { horizontal-stretch: 0.25; }
+
+        // 来源组（lucide/globe Gray4 + 12px Gray4，Margin 5,0,2,0）
+        Rectangle {
+            width: 12px + 5px + src-txt.preferred-width + 2px;
+            height: 100%;
+            Image {
+                x: 0; y: 2px; width: 12px; height: 12px;
+                source: @image-url("../assets/icons/lucide/globe.svg");
+                colorize: GlobalTheme.gray4;
+                image-fit: contain;
+            }
+            src-txt := Text {
+                x: 17px; y: 0; height: 100%;
+                text: root.data.source == CompSourceKind.CurseForge ? "CurseForge" : "Modrinth";
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray4;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    // ---- 右侧按钮列（右对齐垂直居中，右边距 5，悬停淡入；纯视觉，点击由 touch 坐标判定）----
+    buttons := Rectangle {
+        x: root._btn-x; y: root._btn-y;
+        width: root._btn-w; height: 25px;
+        opacity: touch.has-hover && root._has-buttons ? 1 : 0;
+        // 淡入 42ms(delay 18ms)，淡出 72ms（原版 time*0.35/delay time*0.15、time*0.4）
+        animate opacity { duration: touch.has-hover ? 42ms : 72ms; delay: touch.has-hover ? 18ms : 0ms; }
+
+        if root.show-download-btn : ItemHoverButton {
+            x: 0; y: 0;
+            icon: @image-url("../assets/icons/lucide/download.svg");
+            hovered: root._hbtn == 1;
+            pressed: root._pbtn == 1 && touch.pressed;
+        }
+        if root.show-favorite-btn : ItemHoverButton {
+            x: root._fav-off; y: 0;
+            icon: root.data.favorited
+                ? @image-url("../assets/icons/lucide/heart-filled.svg")
+                : @image-url("../assets/icons/lucide/heart.svg");
+            hovered: root._hbtn == 2;
+            pressed: root._pbtn == 2 && touch.pressed;
+        }
+    }
+
+    // ---- 交互（最上层单一 TouchArea + 坐标命中判定，对应原版 Button_MouseDown/Up）----
+    touch := TouchArea {
+        width: 100%; height: 100%;
+        enabled: root.enabled;
+        clicked => {
+            if root.btn-at(self.mouse-x, self.mouse-y) == 1 {
+                // 原版守卫：按钮未淡入（Opacity==0）时不响应按钮点击，也不触发整项点击
+                if touch.has-hover { root.download-clicked(); }
+            } else if root.btn-at(self.mouse-x, self.mouse-y) == 2 {
+                if touch.has-hover { root.favorite-toggled(); }
+            } else {
+                root.clicked();
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root._pbtn = root.btn-at(self.mouse-x, self.mouse-y);
+            }
+            if e.kind == PointerEventKind.up {
+                if e.button == PointerEventButton.left { root._pbtn = 0; }
+                if e.button == PointerEventButton.right {
+                    root.right-clicked(self.mouse-x, self.mouse-y);
+                }
+            }
+            if e.kind == PointerEventKind.cancel { root._pbtn = 0; }
+        }
+    }
+}

@@ -1,0 +1,88 @@
+import { GlobalTheme } from "../theme/theme.slint";
+
+export enum ButtonState {
+    Normal,
+    Highlighted,
+    Red,
+    Disabled,
+}
+
+export component MyButton {
+    in property <length> self-width: 120px;
+    in property <length> self-height: 40px;
+    in property <string> text: "这是一个按钮";
+    in property <float> scale: 1.0;
+    in property <ButtonState> button-state: ButtonState.Normal;
+
+    callback clicked();
+
+    width: self-width;
+    height: self-height;
+    
+    property <brush> border-color: {
+        if button-state == ButtonState.Disabled {
+            GlobalTheme.button-border-disabled
+        } else {
+            if touch.has-hover {
+                if button-state == ButtonState.Red {
+                    GlobalTheme.button-border-red-hover
+                } else {
+                    GlobalTheme.button-border-hover
+                }
+            } else {
+                if button-state == ButtonState.Red {
+                    GlobalTheme.button-border-red
+                } else if button-state == ButtonState.Highlighted {
+                    GlobalTheme.button-border-highlight
+                } else {
+                    GlobalTheme.button-border-normal
+                }
+            }
+        }
+    };
+
+    property <brush> background-color: {
+        if button-state == ButtonState.Disabled {
+            GlobalTheme.button-background-disabled
+        } else {
+            if touch.has-hover {
+                if button-state == ButtonState.Red {
+                    GlobalTheme.button-background-red-hover
+                } else {
+                    GlobalTheme.button-background-hover
+                }
+            } else {
+                if button-state == ButtonState.Disabled {
+                    GlobalTheme.button-background-disabled
+                } else {
+                    GlobalTheme.button-background
+                }
+            }
+        }
+    };
+
+    Rectangle {
+        border-radius: GlobalTheme.corner-radius;
+        border-width: GlobalTheme.border-width;
+        border-color: border-color;
+        background: background-color;
+        transform-scale: root.scale * (touch.pressed ? 0.955 : 1.0);
+        animate border-color { duration: 200ms; }
+        animate background { duration: 200ms; }
+        animate transform-scale { duration: 100ms; easing: ease-out; }
+
+        Text {
+            text: root.text;
+            font-size: GlobalTheme.font-size;
+            font-family: GlobalTheme.font-family;
+            color: border-color;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        touch := TouchArea {
+            enabled: root.button-state != ButtonState.Disabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}

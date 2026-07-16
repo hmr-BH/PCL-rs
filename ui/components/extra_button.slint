@@ -1,0 +1,140 @@
+// ==========================================================================
+// PCL-rs 附加按钮（主窗体右下角悬浮圆形按钮）—— 1:1 移植自 PCL-CE MyExtraButton
+//   原版文件：Controls/MyExtraButton.xaml + Controls/MyExtraButton.xaml.cs
+//   ※ 注意：原版 MyExtraButton 是 40×40 圆形悬浮按钮（FormMain 右下角，
+//     如任务管理器/返回顶部），并非"标题+描述卡片按钮"，此处以原版源码为准。
+//
+// 结构：40×50 容器（圆形主体 40×40，顶部 10px 为 PanClick 半透明点击区），
+//   ColorBrush3 圆形 + 投影（BlurRadius 10 / Opacity 0.2 / Depth 0）+
+//   ColorBrush8 图标（Margin 12 → 16px）+ 可选底部上升进度遮罩（#2FFFFFFF）。
+//
+// 关键动画参数（与原版一致）：
+//   悬停变色：常态 ColorBrush3 → 悬停 ColorBrush4 120ms / 恢复 150ms；禁用 Gray4
+//   按下：→ 0.80（-0.15/800ms Fluent Strong 与 -0.05/60ms 叠加 ≈ ease-out-quart 800ms）
+//   松开：→ 1.0，300ms OutBack → cubic-bezier(0.28,1.25,0.50,1.0)
+//   按住移出：→ 1.0，500ms Fluent → ease-out
+//   显示：缩放 0→1（500ms，延迟 60ms，Fluent Weak + OutBack Weak 叠加 ≈ bezier）
+//         + 高度 0→50（200ms Fluent Weak → ease-out-quad）
+//   隐藏：缩放 →0（100ms EaseInFluent Weak → ease-in-quad）
+//         + 高度 →0（400ms，延迟 100ms，Fluent → ease-out），结束后隐藏
+//
+// 已知偏差：
+//   1. 仅支持 lucide SVG 图标；原版 SVG 图标忽略 LogoScale，此处 logo-scale 生效。
+//   2. Ribble() 波浪提示、ToolTip 未移植。
+//   3. 显示/隐藏缩放中心按整个 40×50 容器（原版 PanScale 缩放中心偏下约 5px）。
+//   4. 初始化时 show=true 不播显示动画（Slint 初始赋值不动画）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export component MyExtraButton {
+    in property <image> icon;
+    in property <float> logo-scale: 1.0;
+    in property <bool> enabled: true;
+    in property <bool> can-right-click: false;
+    in-out property <bool> show: false;   // 原版默认隐藏，由 Show 属性驱动显隐动画
+    in-out property <float> progress: 0.0;   // 0~1，底部上升进度遮罩
+    callback clicked();
+    callback right-clicked();
+
+    width: 40px;
+    height: root.show ? 50px : 0px;
+    visible: root._shown;
+    animate height { duration: root.show ? 200ms : 400ms; delay: root.show ? 0ms : 100ms;
+        easing: root.show ? ease-out-quad : ease-out; }
+
+    // ---- 显隐可见性（隐藏动画共 500ms，结束后才真正隐藏）----
+    private property <bool> _shown: false;
+    private property <bool> _hiding: false;
+    private property <bool> _inited: false;
+    tinit := Timer { interval: 1ms; running: !root._inited; triggered => { root._shown = root.show; root._inited = true; } }
+    thide := Timer { interval: 500ms; running: root._hiding; triggered => { root._shown = false; root._hiding = false; } }
+    changed show => {
+        if (root.show) { root._shown = true; root._hiding = false; }
+        else if (root._inited && root._shown) { root._hiding = true; }
+    }
+
+    // ---- 按压缩放（松开回弹窗口 300ms）----
+    private property <bool> _rel: false;
+    trel := Timer { interval: 300ms; running: root._rel; triggered => { root._rel = false; } }
+    private property <float> press-scale: touch.pressed && touch.has-hover ? 0.80 : 1.0;
+    private property <duration> press-time: touch.pressed && touch.has-hover ? 800ms
+        : root._rel ? 300ms : 500ms;
+    private property <easing> press-ease: touch.pressed && touch.has-hover ? ease-out-quart
+        : root._rel ? cubic-bezier(0.28, 1.25, 0.50, 1.0) : ease-out;
+
+    property <brush> circle-color: !root.enabled ? GlobalTheme.gray4
+        : touch.has-hover ? GlobalTheme.color4 : GlobalTheme.color3;
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        enabled: root.enabled && root.show;
+        clicked => { root.clicked(); }
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.left) { root._rel = true; }
+            if (e.kind == PointerEventKind.up && e.button == PointerEventButton.right && root.can-right-click) {
+                root.right-clicked();
+            }
+        }
+    }
+
+    // PanClick：整层半透明背景（ColorBrushSemiTransparent，圆角 1000）
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: min(self.width, self.height) / 2;
+        background: GlobalTheme.color-semi-transparent;
+
+        // 显示/隐藏缩放（原 PanBack RenderTransform）
+        showwrap := Rectangle {
+            width: 100%;
+            height: 100%;
+            transform-scale: root.show ? 1 : 0;
+            animate transform-scale { duration: root.show ? 500ms : 100ms; delay: root.show ? 60ms : 0ms;
+                easing: root.show ? cubic-bezier(0.28, 1.25, 0.50, 1.0) : ease-in-quad; }
+
+            // 按压缩放（原 PanScale，Margin 0,10,0,0 → 圆形区域下移 10px）
+            presswrap := Rectangle {
+                y: 10px;
+                width: 100%;
+                height: parent.height - 10px;
+                transform-scale: root.press-scale;
+                animate transform-scale { duration: root.press-time; easing: root.press-ease; }
+
+                // PanColor：彩色圆形 + 投影
+                circle := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    border-radius: min(self.width, self.height) / 2;
+                    background: root.circle-color;
+                    drop-shadow-blur: 10px;
+                    drop-shadow-offset-x: 0px;
+                    drop-shadow-offset-y: 0px;
+                    drop-shadow-color: #00000033;   // Opacity 0.2
+                    clip: true;
+                    animate background { duration: !root.enabled || touch.has-hover ? 120ms : 150ms; }
+
+                    // PanProgress：进度遮罩（#2FFFFFFF，自底部上升）
+                    if root.progress > 0.0001 : Rectangle {
+                        y: parent.height * (1 - root.progress);
+                        width: 100%;
+                        height: parent.height * root.progress;
+                        background: #2fffffff;
+                    }
+
+                    // IconHost：Margin 12 → 16px 图标，ColorBrush8
+                    Image {
+                        width: 16px * root.logo-scale;
+                        height: 16px * root.logo-scale;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        source: root.icon;
+                        colorize: GlobalTheme.color8;
+                        image-fit: contain;
+                    }
+                }
+            }
+        }
+    }
+}

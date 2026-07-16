@@ -1,0 +1,178 @@
+// ==========================================================================
+// PCL-rs 搜索框 MySearchBox — 1:1 移植
+// 原版文件：Controls/MySearchBox.xaml + MySearchBox.xaml.cs
+// 结构（原版）：
+//   MyCard（Height=40，圆角 5，背景 ColorBrushTransparentBackground，
+//           投影透明度 0.07→0.4 / ColorObject1→ColorObject4，90ms）
+//   └ MyTextBox（HasBackground=False、BorderThickness=0、Padding 32,0,40,0、
+//                MaxLength=50、FontSize=13.5，垂直居中）
+//   └ lucide/search 14×14（Margin 14,0,0,0，ColorBrush1，不响应鼠标）
+//   └ 清除按钮 MyIconButton Theme=Black 24×24（lucide/x，LogoScale 0.75 仅对
+//     非 SVG 生效 → 实际图标 24-2×5=14px；有文本时 90ms 淡入，否则 IsHitTestVisible=False）
+//     颜色：常态 #A0000000 → 悬停 #E6000000（淡入 120ms / 淡出 150ms）
+//     按下缩放 0.8（EaseOutFluent Strong）→ 松开 1.05（250ms EaseOutBack Weak）
+//     → 1.0（250ms EaseOutFluent Strong）
+//   └ 搜索按钮 MyButton ColorType=Highlight 60×(40-4-4)（Margin 0,4,4,4，默认隐藏；
+//     显示时清除按钮右移：Margin.Right 10 → 70）
+// 触发语义：回车 或 点击搜索按钮 → search(text)；输入/清除 → edited(text)
+// 已知偏差：
+//   1. 卡片投影参数沿用 components/card.slint 的近似（blur 6→16、
+//      #343d4a0d→#4890f533、90ms）。
+//   2. 加载后自动聚焦用 50ms 单次 Timer 近似（WPF Loaded 事件）。
+//   3. 悬停判定为各交互区 TouchArea 的并集（WPF IsMouseOver 含子元素）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyTextBox } from "./text_box.slint";
+import { MyButton, ButtonState } from "./button.slint";
+
+export component MySearchBox {
+    in property <string> hint-text: "";
+    in-out property <string> text: "";
+    in property <bool> enabled: true;
+    in property <bool> show-search-button: false;    // 原版 SearchButtonVisibility
+    in property <string> search-button-text: "搜索";
+
+    callback search(string);                         // 回车 / 点击搜索按钮
+    callback edited(string);                         // 文本改变（含清除）
+
+    // 内置 focus() 经 forward-focus 链转发至内部文本框
+    forward-focus: tb;
+
+    property <bool> has-text: root.text != "";
+    property <bool> hovered: card-touch.has-hover || tb.has-hover || clear-touch.has-hover;
+
+    // 加载后自动聚焦（原版 Loaded → TextBox.Focus()）
+    private property <bool> focus-done: false;
+    Timer {
+        interval: 50ms;
+        running: !root.focus-done;
+        triggered => {
+            root.focus-done = true;
+            self.running = false;
+            tb.focus();
+        }
+    }
+
+    height: 40px;
+
+    // ===== 卡片底盘 =====
+    card := Rectangle {
+        x: 0; y: 0;
+        width: 100%; height: 100%;
+        border-radius: 5px;
+        background: GlobalTheme.color-transparent-background;
+
+        drop-shadow-blur: root.hovered ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: root.hovered ? 0px : 2px;
+        drop-shadow-color: root.hovered ? #4890f533 : #343d4a0d;
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        card-touch := TouchArea {
+            width: 100%; height: 100%;
+            enabled: root.enabled;
+        }
+
+        // 输入框（无边框无背景，Padding 32,0,40,0，FontSize 13.5，MaxLength 50）
+        tb := MyTextBox {
+            x: 0; y: 0;
+            width: 100%; height: 100%;
+            box-height: 40px;
+            border-width: 0px;
+            has-background: false;
+            content-padding-left: 32px;
+            content-padding-right: 40px;
+            font-size: 13.5px;
+            max-length: 50;
+            enabled: root.enabled;
+            hint-text: root.hint-text;
+            text <=> root.text;
+            edited(t) => { root.edited(t); }
+            accepted => { root.search(root.text); }    // 回车触发搜索
+        }
+
+        // 搜索图标 lucide/search（14px，左 14，不响应鼠标）
+        Image {
+            x: 14px;
+            y: (parent.height - 14px) / 2;
+            width: 14px; height: 14px;
+            source: @image-url("../assets/icons/lucide/search.svg");
+            colorize: GlobalTheme.color1;
+            image-fit: contain;
+        }
+
+        // ===== 清除按钮（24×24，有文本时 90ms 淡入） =====
+        clear-btn := Rectangle {
+            x: parent.width - (root.show-search-button ? 70px : 10px) - 24px;
+            y: (parent.height - 24px) / 2;
+            width: 24px; height: 24px;
+            border-radius: 12px;
+            opacity: root.has-text ? 1 : 0;
+            animate opacity { duration: 90ms; }
+
+            // 按下 0.8 → 松开 1.05（OutBack 250ms）→ 1.0（OutFluent 250ms）
+            private property <int> cs: 0;
+            ct := Timer {
+                interval: 250ms;
+                running: parent.cs == 1;
+                triggered => { parent.cs = 0; }
+            }
+            property <float> btn-scale: {
+                if clear-touch.pressed { 0.8 }
+                else if self.cs == 1 { 1.05 }
+                else { 1.0 }
+            };
+            property <easing> btn-ease: {
+                if clear-touch.pressed { ease-out }
+                else if self.cs == 1 { cubic-bezier(0.28, 1.25, 0.50, 1.0) }
+                else { ease-out }
+            };
+            transform-scale: self.btn-scale;
+            animate transform-scale {
+                duration: clear-touch.pressed ? 100ms : 250ms;
+                easing: self.btn-ease;
+            }
+
+            Image {
+                x: 5px; y: 5px;
+                width: 14px; height: 14px;
+                source: @image-url("../assets/icons/lucide/x.svg");
+                // Theme=Black：#A0000000 → 悬停 #E6000000（120/150ms）
+                colorize: clear-touch.has-hover
+                    ? Colors.black.with-alpha(0.9)
+                    : Colors.black.with-alpha(0.63);
+                animate colorize { duration: clear-touch.has-hover ? 120ms : 150ms; }
+                image-fit: contain;
+            }
+
+            clear-touch := TouchArea {
+                width: 100%; height: 100%;
+                enabled: root.enabled && root.has-text;
+                mouse-cursor: MouseCursor.pointer;
+                pointer-event(event) => {
+                    // 松开 → 进入 1.05 回弹阶段（原版 MouseUp 动画序列）
+                    if event.kind == PointerEventKind.up { clear-btn.cs = 1; }
+                }
+                clicked => {
+                    root.text = "";
+                    root.edited("");                   // 原版 TextChanged 会随之触发
+                    tb.focus();
+                }
+            }
+        }
+
+        // ===== 搜索按钮（默认隐藏，MyButton Highlight，60×32，Margin 0,4,4,4） =====
+        if root.show-search-button : MyButton {
+            x: parent.width - 60px - 4px;
+            y: 4px;
+            self-width: 60px;
+            self-height: 32px;
+            text: root.search-button-text;
+            button-state: root.enabled ? ButtonState.Highlighted : ButtonState.Disabled;
+            clicked => { root.search(root.text); }
+        }
+    }
+}

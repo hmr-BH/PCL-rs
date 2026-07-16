@@ -1,0 +1,175 @@
+// ==========================================================================
+// PCL-rs 主页新闻卡片 —— 1:1 移植 PCL-CE 主页新闻视图的新闻项
+//   原版文件：Pages/PageHomepage/PageHomepageNewsView.xaml（ItemsControl.ItemTemplate）
+//
+// 结构（原版 MyCard 无标题 + Grid Margin=12，瀑布流 MaxItemWidth=240）：
+//   封面图：MyImage 圆角 6、Stretch=UniformToFill、宽度撑满、高度按图比例；
+//   标题：底 ColorBrushBackground(#deecff)、圆角 6、Padding 5,3、
+//     16px Bold ColorBrush1、自动换行，上间距 5；
+//   作者 + 时间行：13px ColorBrushGray2，作者居左、时间居右，上间距 5；
+//   简介：13px ColorBrushGray4、自动换行，上间距 5；
+//   "查看详情"：MyTextButton 居右（Margin 0,5,5,0）、前景 ColorBrushGray2。
+//   原版无分类 chip（category）；标题底色块即其视觉标识。
+//   点击仅"查看详情"有交互（打开公告链接），整卡不可点。
+//
+// 已知偏差：
+//   1. 卡片外壳采用 PCL-rs MyCard 既有视觉（2px card-border-color 边、
+//      card-background 底、悬停阴影 6→16px / offset-y 2→0，90ms），
+//      与原版 BlurBorder + MyDropShadow 观感一致；
+//   2. 封面图在 Rust 侧完成下载/解码后以 image 传入；无图时该行整体隐藏；
+//   3. "查看详情"用内联文本按钮复刻 MyTextButton 颜色动画
+//      （灰 2 → 悬停 ColorBrush3 100ms / 按下 ColorBrush4 30ms / 离开 200ms）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// 新闻卡片数据
+export struct NewsItemData {
+    image: image,           // 封面图
+    has-image: bool,        // 是否有封面图
+    title: string,          // 标题
+    author: string,         // 作者
+    date: string,           // 发布时间（Rust 侧格式化）
+    description: string,    // 简介
+}
+
+export component NewsItem {
+    in property <NewsItemData> data;
+    in property <string> text-read-more: "查看详情";
+
+    callback read-more-clicked();   // 查看详情（打开公告链接）
+
+    width: 240px;   // 原版瀑布流 MaxItemWidth=240（宿主可覆盖）
+    height: chrome.preferred-height;
+
+    // ---- 卡片外壳（视觉同 PCL-rs MyCard，无标题头）----
+    chrome := Rectangle {
+        width: 100%;
+        height: lay.preferred-height;
+        border-width: 2px;
+        border-radius: 5px;
+        background: hover-touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+        border-color: hover-touch.has-hover ? GlobalTheme.card-border-color-hover : GlobalTheme.card-border-color;
+        drop-shadow-blur: hover-touch.has-hover ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: hover-touch.has-hover ? 0px : 2px;
+        drop-shadow-color: hover-touch.has-hover ? #4890f533 : #343d4a0d;
+        clip: true;
+
+        animate background { duration: 90ms; }
+        animate border-color { duration: 90ms; }
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        // 底层悬停探测（置于内容之下，不拦截按钮点击）
+        hover-touch := TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        // ---- 内容（Grid Margin=12 → padding 12；各行上间距 5 → spacing 5）----
+        lay := VerticalLayout {
+            width: 100%;
+            padding: 12px;
+            spacing: 5px;
+
+            // 封面图（圆角 6 裁剪，高度按图比例）
+            if root.data.has-image : Rectangle {
+                width: 100%;
+                height: root.data.image.width > 0
+                    ? self.width * root.data.image.height / root.data.image.width
+                    : 0px;
+                border-radius: 6px;
+                clip: true;
+
+                Image {
+                    width: 100%;
+                    height: 100%;
+                    source: root.data.image;
+                    image-fit: cover;   // = 原版 Stretch.UniformToFill
+                }
+            }
+
+            // 标题（底 ColorBrushBackground、圆角 6、Padding 5,3、16px Bold）
+            Rectangle {
+                width: 100%;
+                height: title-txt.preferred-height + 6px;
+                border-radius: 6px;
+                background: GlobalTheme.background;
+
+                title-txt := Text {
+                    x: 5px;
+                    y: 3px;
+                    width: parent.width - 10px;
+                    text: root.data.title;
+                    font-size: 16px;
+                    font-weight: 700;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.color1;
+                    wrap: word-wrap;
+                }
+            }
+
+            // 作者 + 时间（13px Gray2，作者左、时间右）
+            Rectangle {
+                width: 100%;
+                height: max(auth-txt.preferred-height, date-txt.preferred-height);
+
+                auth-txt := Text {
+                    x: 0;
+                    width: parent.width - date-txt.preferred-width - 8px;
+                    text: root.data.author;
+                    font-size: 13px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.gray2;
+                    overflow: elide;
+                }
+                date-txt := Text {
+                    x: parent.width - self.preferred-width;
+                    text: root.data.date;
+                    font-size: 13px;
+                    font-family: GlobalTheme.font-family;
+                    color: GlobalTheme.gray2;
+                }
+            }
+
+            // 简介（13px Gray4、自动换行）
+            if root.data.description != "" : Text {
+                width: 100%;
+                text: root.data.description;
+                font-size: 13px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.gray4;
+                wrap: word-wrap;
+            }
+
+            // 查看详情（MyTextButton 居右，Margin 右 5）
+            Rectangle {
+                width: 100%;
+                height: rm-txt.preferred-height;
+
+                rm-txt := Text {
+                    x: parent.width - self.preferred-width - 5px;
+                    text: root.text-read-more;
+                    font-size: 13px;
+                    font-family: GlobalTheme.font-family;
+                    color: rm-touch.pressed && rm-touch.has-hover ? GlobalTheme.color4
+                        : rm-touch.has-hover ? GlobalTheme.color3
+                        : GlobalTheme.gray2;
+                    animate color {
+                        duration: rm-touch.pressed && rm-touch.has-hover ? 30ms
+                            : rm-touch.has-hover ? 100ms : 200ms;
+                    }
+                }
+                rm-touch := TouchArea {
+                    x: parent.width - rm-txt.preferred-width - 5px;
+                    width: rm-txt.preferred-width;
+                    height: rm-txt.preferred-height;
+                    mouse-cursor: pointer;
+                    clicked => { root.read-more-clicked(); }
+                }
+            }
+        }
+    }
+}

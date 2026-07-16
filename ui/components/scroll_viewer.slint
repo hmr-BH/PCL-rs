@@ -1,0 +1,173 @@
+// PCL-rs 滚动视图 — 1:1 移植 PCL-CE MyScrollViewer + MyScrollBar
+//   （Controls/MyScrollViewer.cs、Controls/MyScrollBar.cs、
+//     Application.xaml 第 160~238 行的 MyThumb / MyScrollBar / MyScrollViewer 样式）
+//
+// 滚动条外观（原版样式）：
+//   宽度 8px，右对齐覆盖在内容之上；Thumb = 透明底 + 内嵌圆角 3、外边距 2 的细条；
+//   颜色（MyScrollBar.RefreshColor）：
+//     常态 ColorBrush4(#4890f5) opacity 0.5（180ms 过渡）
+//     悬停 ColorBrush3(#1370f3) opacity 0.9（130ms）
+//     拖动 ColorBrush4 opacity 1.0（50ms）
+//   点击 Thumb 上下轨道翻页（PageUp/PageDown，一页 = 视口高度）；
+//   内容不可滚动时整体隐藏。
+// 滚动行为（MyScrollViewer_PreviewMouseWheel / PerformVerticalOffsetDelta）：
+//   滚轮偏移经 300ms OutFluent(power≈6) 缓动动画过渡 → 这里用
+//   Flickable 的 animate viewport-y（cubic-bezier(0.22,1,0.36,1)，250ms）近似。
+//
+// API：
+//   viewport-y <=>      内容偏移（负值，与 Flickable 一致）
+//   content-height      内容总高（out）
+//   visible-height      视口高（out）
+//   scrollable-height   可滚动范围（out）
+//   scroll-to(y) / scroll-by(d) / scroll-to-top() / scroll-to-bottom()
+//   内容通过默认子元素放置（@children），需要自行给出宽度（通常 = root.content-width）
+//
+// 已知偏差：
+//   - 原版滚轮增量 = 系统滚轮行距×DeltaMult；Slint Flickable 滚轮步长不可调，
+//     DeltaMult 属性仅作占位，不生效。
+//   - 拖动 Thumb 时视口跟随也带同一缓动（原版拖动为即时跟随），略有"平滑追逐"感。
+//   - 轨道长按连续翻页（RepeatButton）未实现，仅单击翻页。
+//   - Thumb 最小高度定为 20px（原版由 WPF 主题隐式决定，未写明）。
+//   - 颜色过渡统一为 130ms（原版 50/130/180ms 分态）。
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+// ==========================================================================
+// MyScrollBar — 细滚动条（可独立使用）
+// ==========================================================================
+export component MyScrollBar inherits Rectangle {
+    in-out property <length> value: 0px;        // 当前滚动偏移（>=0）
+    in property <length> max-value: 0px;        // 可滚动范围（内容高-视口高）
+    in property <length> page-size: 0px;        // 视口高
+    callback scrolled(length);                  // 用户拖动/翻页 → 请求新 value
+
+    property <bool> _scrollable: root.max-value > 1px;
+    property <length> _thumb-h: max(20px,
+        root.page-size + root.max-value > 0px
+            ? track.height * (root.page-size / (root.page-size + root.max-value))
+            : track.height);
+    property <length> _thumb-y:
+        root.max-value > 0px && track.height > root._thumb-h
+            ? (root.value / root.max-value) * (track.height - root._thumb-h)
+            : 0px;
+
+    width: 8px;
+    visible: root._scrollable;
+
+    // 轨道（透明，点击翻页）
+    track := Rectangle {
+        x: 0; y: 0;
+        width: 100%;
+        height: 100%;
+
+        // 轨道点击翻页（PageUp/PageDown，一页 = 视口高）
+        // 声明在 Thumb 之前，保证 Thumb 在其上层接收拖动
+        track-hover := TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                if self.mouse-y < root._thumb-y {
+                    root.scrolled(max(0px, root.value - root.page-size));
+                } else if self.mouse-y > root._thumb-y + root._thumb-h {
+                    root.scrolled(min(root.max-value, root.value + root.page-size));
+                }
+            }
+        }
+
+        // Thumb：外层透明底 + 内层圆角 3 细条（外边距 2 → 视觉宽 4px，悬停 1 → 6px）
+        thumb := Rectangle {
+            x: 0;
+            y: root._thumb-y;
+            width: 100%;
+            height: root._thumb-h;
+            background: GlobalTheme.color-semi-transparent;
+
+            Rectangle {
+                x: thumb-touch.pressed || track-hover.has-hover ? 1px : 2px;
+                width: parent.width - 2 * self.x;
+                height: 100%;
+                border-radius: 3px;
+                background: thumb-touch.pressed ? GlobalTheme.color4
+                          : track-hover.has-hover ? GlobalTheme.color3
+                          : GlobalTheme.color4;
+                opacity: thumb-touch.pressed ? 1.0
+                       : track-hover.has-hover ? 0.9 : 0.5;
+                animate x { duration: 130ms; }
+                animate background { duration: 130ms; }
+                animate opacity { duration: 130ms; }
+            }
+
+            thumb-touch := TouchArea {
+                x: -2px;   // 略扩大命中区
+                width: parent.width + 4px;
+                height: 100%;
+                mouse-cursor: default;
+                property <length> _start-value: 0px;
+                property <length> _start-mouse: 0px;
+                pointer-event(e) => {
+                    if e.kind == PointerEventKind.down {
+                        self._start-value = root.value;
+                        self._start-mouse = self.mouse-y;
+                    }
+                }
+                moved => {
+                    if self.pressed && track.height > root._thumb-h {
+                        root.scrolled(min(root.max-value, max(0px,
+                            self._start-value
+                            + (self.mouse-y - self._start-mouse) / (track.height - root._thumb-h) * root.max-value)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// MyScrollViewer — Flickable + 自定义滚动条
+// ==========================================================================
+export component MyScrollViewer inherits Rectangle {
+    in-out property <length> viewport-y <=> flick.viewport-y;
+    out property <length> content-height <=> flick.viewport-height;
+    out property <length> visible-height <=> flick.height;
+    out property <length> scrollable-height: max(0px, flick.viewport-height - flick.height);
+    out property <length> content-width <=> flick.width;
+    in property <float> delta-mult: 1.0;   // 占位（原版滚轮倍率，Slint 侧不生效，见偏差说明）
+
+    // 滚动到指定偏移（y >= 0，经缓动动画）
+    public function scroll-to(y: length) {
+        flick.viewport-y = -min(root.scrollable-height, max(0px, y));
+    }
+    public function scroll-by(d: length) {
+        root.scroll-to(-flick.viewport-y + d);
+    }
+    public function scroll-to-top() {
+        root.scroll-to(0px);
+    }
+    public function scroll-to-bottom() {
+        root.scroll-to(root.scrollable-height);
+    }
+
+    clip: true;
+
+    flick := Flickable {
+        x: 0; y: 0;
+        width: 100%;
+        height: 100%;
+        interactive: true;
+        // 滚轮/程序化滚动的平滑缓动（近似原版 300ms OutFluent power 6）
+        animate viewport-y { duration: 250ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+
+        @children
+    }
+
+    // 细滚动条（右对齐，覆盖于内容之上，与原版模板一致）
+    bar := MyScrollBar {
+        x: parent.width - 8px;
+        y: 0;
+        height: 100%;
+        value: -flick.viewport-y;
+        max-value: root.scrollable-height;
+        page-size: flick.height;
+        scrolled(v) => { root.scroll-to(v); }
+    }
+}

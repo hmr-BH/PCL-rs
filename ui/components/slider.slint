@@ -1,0 +1,238 @@
+// ==========================================================================
+// PCL-rs 滑动条 MySlider — 1:1 移植
+// 原版文件：Controls/MySlider.xaml + MySlider.xaml.cs
+// 关键参数（原版）：
+//   高度固定 16px；底背景 ColorBrushSemiTransparent（无边框）
+//   底轨 LineBack：1px 色 ColorBrushBg0、不透明度 0.3、右边距 1
+//   进度 LineFore：2px、左边距 1、色跟随 BorderBrush
+//   滑块 ShapeDot：10×10 圆、描边 1.2（=BorderBrush）、填充同前景色
+//   颜色：悬停或拖动 ColorBrush3（40ms）、还原 ColorBrushBg0（100ms）、
+//     禁用 ColorBrushGray5（200ms）
+//   拖动：按下缩放→1.3（40ms EaseOutFluent），松开→1.0（200ms EaseOutFluent）
+//   值动画：time = (1-(1-Δp)³)×300ms（按键额外 +100ms），time>50 用
+//     EaseOutFluent 否则线性 —— Slint 侧统一用动态 duration + 默认缓动近似
+//   按键：悬停即聚焦（原版 MouseEnter→Focus()），←/→ 按 ValueByKey 步进，
+//     提示弹层 700ms 后自动隐藏
+//   提示弹层（getHintText 非空时）：下方 38px、跟随滑块、白底、
+//     边框 ColorBrush1 1.5px、圆角 3、投影 Opacity 0.4 Blur 4 Depth 2、
+//     文字 12px ColorBrush1、Margin 7,5、PopupAnimation=Fade
+// 已知偏差：
+//   1. 原版值域固定 0..MaxValue；本组件扩展 min-value（默认 0，行为一致）。
+//   2. 按下瞬间立即按指针位置跳值（原版要等首次 MouseMove，实际无差别）。
+//   3. 提示弹层横向位置 = 滑块中心并夹取在控件内（原版用 WPF Popup
+//      Placement=Center + HorizontalOffset 组合，效果近似）；长提示不换行
+//      （原版 MaxWidth 500 自动换行）。
+//   4. 窗口尺寸改变时进度可能带残余动画（原版 RefreshWidth 瞬时重置）。
+//   5. Change 回调的 user 标记：拖动/按键为 true（原版恒为 false，无实际消费方）。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+
+export component MySlider {
+    in property <int> min-value: 0;              // 原版固定 0（扩展）
+    in property <int> max-value: 100;            // 原版 MaxValue
+    in-out property <int> value: 0;
+    in property <int> value-by-key: 1;           // 原版 ValueByKey
+    in property <bool> enabled: true;
+
+    callback changed(int, bool);                 // 原版 Change(value, user)
+    callback preview-change(int) -> bool;        // 原版 PreviewChange，返回 true=拦截
+    pure callback get-hint-text(int) -> string;  // 原版 getHintText 委托（绑定中调用，须 pure）
+
+    // 内置 focus() 经 forward-focus 转发至内部 FocusScope
+    forward-focus: fs;
+
+    // ---- 状态 ----
+    private property <bool> dragging: false;
+    private property <bool> by-key: false;
+    private property <bool> key-popup: false;
+    private property <int> applied: root.min-value;      // 已应用的值
+    private property <duration> anim-time: 0ms;          // 值动画时长（动态）
+
+    property <string> hint-text: root.get-hint-text(root.value);
+    property <bool> hint-visible: (root.dragging || root.key-popup)
+        && root.hint-text != "" && root.enabled;
+
+    // ---- 几何（progress ∈ [0, width-10]，滑块直径 10） ----
+    property <length> track-len: max(0px, root.width - 10px);
+    property <float> ratio: root.max-value > root.min-value
+        ? (root.value - root.min-value) * 1.0 / (root.max-value - root.min-value) : 0;
+    property <length> progress: root.ratio * root.track-len;
+
+    // ---- 颜色（原版 RefreshColor） ----
+    property <bool> hot: root.dragging || touch.has-hover;
+    property <brush> fore-color: {
+        if !root.enabled { GlobalTheme.gray5 }
+        else if root.hot { GlobalTheme.color3 }
+        else { GlobalTheme.color-bg0 }
+    };
+    // 注意：animate duration 绑定在 enabled:false 实例中若被常量折叠并移除，
+    // 会触发 Slint 编译器 remove_unused 内部 panic。下列写法保证禁用实例中
+    // 分支值仍不同（禁用实例颜色恒定、动画本就不会播放），从而永不折叠。
+    property <duration> color-time: {
+        if root.hot { 40ms }
+        else { !root.enabled ? 200ms : 100ms }
+    };
+
+    // ---- 值改变统一入口（含越界夹取 / Preview 拦截 / 动画时长） ----
+    private property <int> pending-v: 0;
+    changed value => {
+        root.pending-v = clamp(root.value, root.min-value, root.max-value);
+        if root.pending-v == root.applied {
+            if root.value != root.pending-v { root.value = root.pending-v; }   // 仅越界修正
+            return;
+        }
+        if root.preview-change(root.pending-v) {         // 原版 PreviewChange handled → 还原
+            root.value = root.applied;
+            root.dragging = false;
+            return;
+        }
+        // time = (1-(1-Δp)³)×300ms（按键 +100ms）
+        root.anim-time = (1 - pow(1 - abs(root.pending-v - root.applied) * 1.0
+            / max(1, root.max-value - root.min-value), 3)) * 300ms
+            + (root.by-key ? 100ms : 0ms);
+        root.applied = root.pending-v;
+        if root.value != root.pending-v { root.value = root.pending-v; }
+        root.changed(root.pending-v, root.dragging || root.by-key);
+    }
+
+    function update-from-x(x: length) {
+        // percent = (指针X - 滑块半径) / (宽 - 滑块直径)，夹取 [0,1]
+        root.value = root.min-value + round(
+            (root.track-len > 0px ? clamp((x - 5px) / root.track-len, 0, 1) : 0)
+            * (root.max-value - root.min-value));
+    }
+
+    // 按键提示弹层自动隐藏（原版 700ms 后关闭）
+    key-timer := Timer {
+        interval: 700ms;
+        running: false;
+        triggered => {
+            root.key-popup = false;
+            self.running = false;
+        }
+    }
+    function flash-key-popup() {
+        if root.hint-text != "" {
+            root.key-popup = true;
+            key-timer.running = false;
+            key-timer.running = true;            // 重新计时
+        }
+    }
+
+    height: 16px;                                // 原版 MinHeight=MaxHeight=16
+
+    fs := FocusScope {
+        width: 100%; height: 100%;
+
+        key-pressed(event) => {
+            if !root.enabled || root.dragging { return reject; }
+            if event.text == Key.LeftArrow {
+                root.by-key = true;
+                root.value -= root.value-by-key;
+                root.by-key = false;
+                root.flash-key-popup();
+                return accept;
+            }
+            if event.text == Key.RightArrow {
+                root.by-key = true;
+                root.value += root.value-by-key;
+                root.by-key = false;
+                root.flash-key-popup();
+                return accept;
+            }
+            reject
+        }
+
+        // 底背景（原版 PanBack Background=ColorBrushSemiTransparent）
+        Rectangle {
+            width: 100%; height: 100%;
+            background: GlobalTheme.color-semi-transparent;
+        }
+
+        // 底轨 LineBack（1px、Bg0、不透明度 0.3、右边距 1，宽度随进度动画）
+        Rectangle {
+            x: root.progress + 9px;
+            width: max(0px, root.width - 1px - self.x);
+            y: 7.5px; height: 1px;
+            background: GlobalTheme.color-bg0;
+            opacity: 0.3;
+            animate x { duration: root.anim-time; }
+            animate width { duration: root.anim-time; }
+        }
+
+        // 进度 LineFore（2px、左边距 1、色跟随前景）
+        Rectangle {
+            x: 1px;
+            width: max(0px, root.progress);
+            y: 7px; height: 2px;
+            background: root.fore-color;
+            animate width { duration: root.anim-time; }
+            animate background { duration: root.color-time; }
+        }
+
+        // 滑块 ShapeDot（10×10、描边 1.2、拖动缩放 1.3/1.0）
+        dot := Rectangle {
+            x: root.progress;
+            y: 3px;
+            width: 10px; height: 10px;
+            border-radius: 5px;
+            border-width: 1.2px;
+            border-color: root.fore-color;
+            background: root.fore-color;
+            transform-scale: root.dragging ? 1.3 : 1.0;
+            animate transform-scale { duration: root.dragging ? 40ms : 200ms; }
+            animate x { duration: root.anim-time; }
+            animate border-color { duration: root.color-time; }
+            animate background { duration: root.color-time; }
+        }
+
+        // 提示弹层（下方 38px、跟随滑块、Fade 100ms）
+        tip := Rectangle {
+            property <length> tw: hint.preferred-width + 14px;   // Margin 7,5
+            width: self.tw;
+            height: hint.preferred-height + 10px;
+            x: min(max(0px, root.progress + 5px - self.tw / 2),
+                   max(0px, root.width - self.tw));
+            y: 38px;
+            background: Colors.white;
+            border-radius: 3px;
+            border-width: 1.5px;
+            border-color: GlobalTheme.color1;
+            drop-shadow-blur: 4px;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 2px;
+            drop-shadow-color: #00000066;        // DropShadowEffect Opacity 0.4
+            opacity: root.hint-visible ? 1 : 0;
+            visible: self.opacity > 0;
+            animate opacity { duration: 100ms; }
+
+            hint := Text {
+                x: 7px; y: 5px;
+                text: root.hint-text;
+                font-size: 12px;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.color1;
+            }
+        }
+
+        // 拖动（按下开始并聚焦，移动更新，松开结束；悬停移动即聚焦以便按键）
+        touch := TouchArea {
+            width: 100%; height: 100%;
+            enabled: root.enabled;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    root.dragging = true;
+                    fs.focus();
+                    root.update-from-x(self.mouse-x);
+                } else if event.kind == PointerEventKind.up {
+                    root.dragging = false;
+                }
+            }
+            moved => {
+                fs.focus();                      // 原版 MouseEnter → Focus()
+                if root.dragging { root.update-from-x(self.mouse-x); }
+            }
+        }
+    }
+}

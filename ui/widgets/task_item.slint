@@ -1,0 +1,227 @@
+// ==========================================================================
+// PCL-rs 下载任务行 / 任务卡片 —— 1:1 移植 PCL-CE 任务管理右页的任务卡片
+//   原版文件：Pages/PageSpeedLeft.xaml.cs（TaskRefresh 内 cardXAML 动态构建）
+//     （Pages/PageSpeedRight.xaml 仅为容器）
+//
+// 结构（原版 MyCard，Title=任务名，Margin 0,0,0,15）：
+//   标题：MyCard 标准标题（13px Bold，Margin 15,12）；
+//   取消按钮：MyIconButton lucide/x、25×25、LogoScale 1.1、
+//     右上 Margin 0,10,10,0，点击 → 销毁卡片并 Abort 任务；
+//   内容 Grid：Margin 14,40,15,10；两列 = 50px 状态列 + 任务名列；
+//     每个子任务一行、行高 26px；状态图标全部 ColorBrush3：
+//       等待 Waiting  → 三点 Path（18×6，Margin 顶 7，居中）；
+//       进行 Loading  → 百分比文本（"42%"，水平居中）；
+//       完成 Finished → 对勾 Path（15×16，Margin 顶 3，居中）；
+//       失败 Failed   → 红叉 Path（15×15，Margin 顶 1，居中）；
+//   整卡失败：内容替换为 红叉(15×15) + 错误文本（自动换行，点击复制到剪贴板，
+//     Margin 底 5）；整卡完成：卡片动画销毁。
+//
+// 与任务书描述的差异（按原版实际实现）：
+//   原版任务行【没有】进度条、速度/ETA 文本与行内图标 —— 进度以状态列的
+//   百分比文本呈现，速度/ETA 显示在左侧导航页（PageSpeedLeft）而非右页卡片。
+//   故 TaskItemData 仅含 name / state / progress；错误文本在 TaskCard 上。
+//
+// 已知偏差：
+//   1. 错误文本的 ToolTip（"点击复制"）未移植；
+//   2. 卡片销毁动画（AniDispose）由宿主结合 Rust 侧实现，本部件不含。
+// ==========================================================================
+
+import { GlobalTheme } from "../theme/theme.slint";
+import { MyIconButton } from "../components/icon_button.slint";
+
+// 子任务状态（对应原版 ModBase.LoadState 的四种显示）
+export enum TaskState { Waiting, Loading, Finished, Failed }
+
+// 子任务行数据
+export struct TaskItemData {
+    name: string,       // 子任务名
+    state: TaskState,   // 状态
+    progress: float,    // 0..1（仅 Loading 显示为百分比）
+}
+
+// ==========================================================================
+// TaskItem —— 单个子任务行（高 26px；50px 状态列 + 任务名）
+// ==========================================================================
+export component TaskItem {
+    in property <TaskItemData> data;
+
+    height: 26px;
+
+    // ---- 状态列（50px，全部 ColorBrush3，水平居中）----
+    // 等待：三点（原版 arc 圆点 Path，viewbox 40×10）
+    if root.data.state == TaskState.Waiting : Path {
+        x: (50px - 18px) / 2;
+        y: 7px;
+        width: 18px;
+        height: 6px;
+        viewbox-width: 40;
+        viewbox-height: 10;
+        fill: GlobalTheme.color3;
+        commands: "M5,0 a5,5 360 1 0 0,0.0001 m15,0 a5,5 360 1 0 0,0.0001 m15,0 a5,5 360 1 0 0,0.0001 Z";
+    }
+    // 进行：百分比文本（P0 取整）
+    if root.data.state == TaskState.Loading : Text {
+        x: 0;
+        width: 50px;
+        height: 100%;
+        text: Math.round(root.data.progress * 100) + "%";
+        font-size: GlobalTheme.font-size;
+        font-family: GlobalTheme.font-family;
+        color: GlobalTheme.color3;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // 完成：对勾（原版 Path 几何范围 x19..57 y22..54）
+    if root.data.state == TaskState.Finished : Path {
+        x: (50px - 15px) / 2;
+        y: 3px;
+        width: 15px;
+        height: 16px;
+        viewbox-x: 19;
+        viewbox-y: 22;
+        viewbox-width: 38;
+        viewbox-height: 32;
+        fill: GlobalTheme.color3;
+        commands: "M 23.7501,33.25 L 34.8334,44.3333 L 52.2499,22.1668 L 56.9999,26.9168 L 34.8334,53.8333 L 19.0001,38 L 23.7501,33.25 Z";
+    }
+    // 失败：红叉（原版 Path 几何范围 0..20，填充色同为 ColorBrush3）
+    if root.data.state == TaskState.Failed : Path {
+        x: (50px - 15px) / 2;
+        y: 1px;
+        width: 15px;
+        height: 15px;
+        viewbox-width: 20;
+        viewbox-height: 20;
+        fill: GlobalTheme.color3;
+        commands: "M2.5,0 L0,2.5 7.5,10 0,17.5 2.5,20 10,12.5 17.5,20 20,17.5 12.5,10 20,2.5 17.5,0 10,7.5 2.5,0Z";
+    }
+
+    // ---- 任务名（13px ColorBrush1，左对齐）----
+    Text {
+        x: 50px;
+        width: parent.width - 50px;
+        height: 100%;
+        text: root.data.name;
+        font-size: GlobalTheme.font-size;
+        font-family: GlobalTheme.font-family;
+        color: GlobalTheme.color1;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// ==========================================================================
+// TaskCard —— 任务卡片（标题 + 取消按钮 + 子任务行列表 / 失败错误视图）
+// ==========================================================================
+export component TaskCard {
+    in property <string> title: "";
+    in property <[TaskItemData]> tasks: [];
+    in property <bool> failed: false;   // 整卡失败（显示错误视图）
+    in property <string> error: "";     // 失败错误文本
+
+    callback cancel-clicked();   // 取消（销毁卡片 + Abort 任务）
+    callback error-clicked();    // 点击错误文本（复制到剪贴板）
+
+    width: 100%;
+    height: chrome.preferred-height;
+
+    chrome := Rectangle {
+        width: 100%;
+        height: root.failed
+            ? 40px + err-view.preferred-height + 10px
+            : 40px + rows.preferred-height + 10px;
+        border-width: 2px;
+        border-radius: 5px;
+        background: hover-touch.has-hover ? GlobalTheme.card-background-hover : GlobalTheme.card-background;
+        border-color: hover-touch.has-hover ? GlobalTheme.card-border-color-hover : GlobalTheme.card-border-color;
+        drop-shadow-blur: hover-touch.has-hover ? 16px : 6px;
+        drop-shadow-offset-x: 0px;
+        drop-shadow-offset-y: hover-touch.has-hover ? 0px : 2px;
+        drop-shadow-color: hover-touch.has-hover ? #4890f533 : #343d4a0d;
+        clip: true;
+
+        animate background { duration: 90ms; }
+        animate border-color { duration: 90ms; }
+        animate drop-shadow-blur { duration: 90ms; }
+        animate drop-shadow-offset-y { duration: 90ms; }
+        animate drop-shadow-color { duration: 90ms; }
+
+        hover-touch := TouchArea {
+            width: 100%;
+            height: 100%;
+        }
+
+        // ---- 标题（13px Bold，Margin 15,12）----
+        Text {
+            x: 15px;
+            y: 12px;
+            width: parent.width - 15px - 45px;   // 让出取消按钮位
+            text: root.title;
+            font-size: GlobalTheme.font-size;
+            font-weight: GlobalTheme.title-font-weight;
+            font-family: GlobalTheme.font-family;
+            color: hover-touch.has-hover ? GlobalTheme.primary-text-color : GlobalTheme.secondary-text-color;
+            overflow: elide;
+            animate color { duration: 90ms; }
+        }
+
+        // ---- 子任务行列表（Grid Margin 14,40,15,10）----
+        rows := VerticalLayout {
+            x: 14px;
+            y: 40px;
+            width: parent.width - 14px - 15px;
+            visible: !root.failed;
+
+            for task in root.tasks : TaskItem {
+                data: task;
+            }
+        }
+
+        // ---- 失败错误视图（红叉 + 可点击错误文本）----
+        err-view := Rectangle {
+            x: 14px;
+            y: 40px;
+            width: parent.width - 14px - 15px;
+            height: err-txt.preferred-height + 5px;   // 文本 Margin 底 5
+            visible: root.failed;
+
+            Path {   // 红叉（同 TaskItem 失败态，居中于 50px 状态列）
+                x: (50px - 15px) / 2;
+                y: 1px;
+                width: 15px;
+                height: 15px;
+                viewbox-width: 20;
+                viewbox-height: 20;
+                fill: GlobalTheme.color3;
+                commands: "M2.5,0 L0,2.5 7.5,10 0,17.5 2.5,20 10,12.5 17.5,20 20,17.5 12.5,10 20,2.5 17.5,0 10,7.5 2.5,0Z";
+            }
+            err-txt := Text {
+                x: 50px;
+                width: parent.width - 50px;
+                text: root.error;
+                font-size: GlobalTheme.font-size;
+                font-family: GlobalTheme.font-family;
+                color: GlobalTheme.color1;
+                wrap: word-wrap;
+            }
+            // 点击错误文本 → 复制到剪贴板（宿主实现 + Hint 提示）
+            TouchArea {
+                x: 50px;
+                width: parent.width - 50px;
+                height: err-txt.preferred-height;
+                clicked => { root.error-clicked(); }
+            }
+        }
+
+        // ---- 取消按钮（lucide/x、25×25、LogoScale 1.1、Margin 0,10,10,0）----
+        MyIconButton {
+            x: parent.width - 25px - 10px;
+            y: 10px;
+            self-width: 25px;
+            self-height: 25px;
+            icon: @image-url("../assets/icons/lucide/x.svg");
+            logo-scale: 1.1;
+            clicked => { root.cancel-clicked(); }
+        }
+    }
+}
