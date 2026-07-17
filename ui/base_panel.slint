@@ -1,0 +1,29 @@
+import { GlobalTheme } from "theme/theme.slint";
+import { Demo } from "demo.slint";
+
+
+export component BasePanel inherits Rectangle {
+    width: 880px;
+    height: 530px;
+    background: GlobalTheme.background;
+    border-width: 1px;
+    border-radius: 6px;
+
+    in property <bool> entrance-started: false;
+    property <length> entrance-y: entrance-started ? 0px : 60px;
+    property <angle> entrance-rotation: entrance-started ? 0deg : -4deg;
+    property <float> entrance-opacity: entrance-started ? 1.0 : 0.0;
+
+    animate entrance-y { duration: 600ms; easing: ease-out-back; delay: 100ms; }
+    animate entrance-rotation { duration: 500ms; easing: ease-out-back; delay: 100ms; }
+    animate entrance-opacity { duration: 250ms; easing: ease; delay: 100ms; }
+
+    opacity: entrance-opacity;
+    y: entrance-y;
+    transform-rotation: entrance-rotation;
+
+    Demo {
+        width: 880px;
+        height: 530px;
+    }
+}

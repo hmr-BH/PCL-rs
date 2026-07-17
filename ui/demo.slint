@@ -3,13 +3,10 @@ import { GlobalTheme } from "theme/theme.slint";
 import { MyCheckBox, TriStateCheckBox } from "components/checkbox.slint";
 import { MyCard } from "components/card.slint";
 import { MyComboBox } from "components/combo_box.slint";
-import { GridBox, HorizontalBox } from "std-widgets.slint";
+import { HorizontalBox } from "std-widgets.slint";
 
-export component AppWindow inherits Window {
-    height: 600px;
-    width: 900px;
-    background: GlobalTheme.background;
-
+export component Demo inherits Rectangle {
+    
     out property <string> state-text: "";
 
     // 子项状态
@@ -280,3 +277,4 @@ export component AppWindow inherits Window {
         }
     }
 }
+        

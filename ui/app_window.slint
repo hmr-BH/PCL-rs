@@ -1,0 +1,17 @@
+import { BasePanel } from "base_panel.slint";
+
+export component AppWindow inherits Window {
+    height: 564px;
+    width: 910px;
+    background: transparent;
+    no-frame: true;
+
+    // 启动入场动画触发开关，Rust 端在窗口渲染就绪后调用
+    in-out property <bool> entrance-started: false;
+
+    BasePanel {
+        width: 880px;
+        height: 530px;
+        entrance-started: root.entrance-started;
+    }
+}
