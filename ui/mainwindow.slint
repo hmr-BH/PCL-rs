@@ -2,6 +2,7 @@ import { MyButton, ButtonState } from "components/button.slint";
 import { GlobalTheme } from "theme/theme.slint";
 import { MyCheckBox, TriStateCheckBox } from "components/checkbox.slint";
 import { MyCard } from "components/card.slint";
+import { MyComboBox } from "components/combo_box.slint";
 import { GridBox, HorizontalBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
@@ -24,8 +25,10 @@ export component AppWindow inherits Window {
 
     private property <int> total_count: 3;
 
-    // ---- MyCard dynamic content test state ----
     private property <int> bar1_count: 1;
+
+    in-out property <int> combo-current-index: 0;
+    private property <[string]> combo-items: ["选项 Alpha", "选项 Beta", "选项 Gamma", "选项 Delta", "选项 Epsilon"];
 
     VerticalLayout {
         spacing: 20px;
@@ -107,7 +110,37 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // ===== MyCard with dynamic content (matching previous CollapseBar test) =====
+            HorizontalLayout {
+                alignment: center;
+                spacing: 40px;
+
+                MyComboBox {
+                    model: root.combo-items;
+                    current-index <=> root.combo-current-index;
+                    width: 200px;
+                    changed(idx, txt) => {
+                        root.state-text = "下拉框选择了: [" + idx + "] " + txt;
+                    }
+                }
+
+                Text {
+                    text: "当前选中: " + root.combo-items[root.combo-current-index];
+                    font-size: GlobalTheme.font-size;
+                    font-family: GlobalTheme.font-family;
+                    color: #555555;
+                    vertical-alignment: center;
+                }
+
+                MyButton {
+                    text: "切换到 Gamma";
+                    button-state: ButtonState.Normal;
+                    clicked => {
+                        root.combo-current-index = 2;
+                        root.state-text = "程序设置: 选项 Gamma";
+                    }
+                }
+            }
+
             card := MyCard {
                 title: "动态内容测试 - 点击展开";
                 can-swap: true;

@@ -1,29 +1,3 @@
-// ==========================================================================
-// PCL-rs 单行文本输入框 MyTextBox — 1:1 移植
-// 原版文件：
-//   Controls/MyTextBox.cs
-//   Application.xaml 中 <Style TargetType="local:MyTextBox">（约 309~363 行）
-// 关键参数（原版）：
-//   高度 MinHeight 28px，圆角 CornerRadius=3，边框 1px，字号 13
-//   常态：边框 ColorBrushBg0 / 背景 ColorBrushHalfWhite（100ms）
-//   悬停：边框 ColorBrush4 / 背景 ColorBrush7（100ms）
-//   聚焦：边框 ColorBrush3 / 背景 ColorBrush7（10ms）
-//   验证失败（用户输入过后）：ColorBrushRedLight / ColorBrushRedBack（200ms）
-//   禁用：ColorBrushGray5 / ColorBrushGray6（200ms），文字 Gray1→Gray4（200ms）
-//   错误行 labWrong：高 0→21px + 透明度 0→1，150ms EaseOutFluent，
-//     Padding 0,4,0,0，颜色跟随 BorderBrush（失败时为 RedLight）
-//   水印 labHint：Gray4，与文字同位（边框 1 + 宿主 5 + TextView 2 = 8px）
-//   选区刷 SelectionBrush=ColorBrush3（WPF 默认 SelectionOpacity 0.4）
-// 已知偏差：
-//   1. 原版 MyTextBox 自身没有清除按钮（清除按钮属于 MySearchBox），故无。
-//   2. 密码模式用 TextInput input-type:password 实现（原版为相同样式的
-//      PasswordBox，颜色规则一致）。
-//   3. 文本超长横向滚动由 cursor-position-changed 手动驱动（WPF 自动滚动）。
-//   4. 错误行 Margin 0,0,0,-3 的 -3px 回吸未复刻（视觉差异可忽略）。
-//   5. max-length 在输入后回退到上一有效文本（WPF 在输入前拦截），
-//      超长瞬间光标跳到末尾。
-// ==========================================================================
-
 import { GlobalTheme } from "../theme/theme.slint";
 
 export component MyTextBox {
@@ -60,20 +34,20 @@ export component MyTextBox {
 
     // ---- 颜色（原版 RefreshColor，动画时长取目标状态时长） ----
     property <brush> border-color: {
-        if !root.enabled { GlobalTheme.gray5 }
-        else if root.invalid-shown { GlobalTheme.red-light }
-        else if input.has-focus { GlobalTheme.color3 }
-        else if touch.has-hover { GlobalTheme.color4 }
-        else { GlobalTheme.color-bg0 }
+        if !root.enabled { GlobalTheme.secondary-text-color }
+        else if root.invalid-shown { GlobalTheme.button-border-red }
+        else if input.has-focus { GlobalTheme.primary-text-color }
+        else if touch.has-hover { GlobalTheme.primary-text-color }
+        else { GlobalTheme.secondary-text-color }
     };
     property <brush> back-color: {
         if !root.has-background { Colors.transparent }
-        else if !root.enabled { GlobalTheme.gray6 }
-        else if root.invalid-shown { GlobalTheme.red-back }
-        else if input.has-focus || touch.has-hover { GlobalTheme.color7 }
-        else { GlobalTheme.color-half-white }
+        else if !root.enabled { GlobalTheme.background }
+        else if root.invalid-shown { GlobalTheme.button-border-red }
+        else if input.has-focus || touch.has-hover { GlobalTheme.background }
+        else { GlobalTheme.background }
     };
-    property <brush> text-color: root.enabled ? GlobalTheme.gray1 : GlobalTheme.gray4;
+    property <brush> text-color: root.enabled ? GlobalTheme.primary-text-color : GlobalTheme.secondary-text-color;
     // 状态动画时长（原版：聚焦 10ms / 悬停·常态 100ms / 失败·禁用 200ms）。
     // 注意：必须内联写在 animate 的 duration 里——若提取为自定义属性，
     // 在 enabled:false 实例中会被常量折叠并移除，触发 Slint 编译器
@@ -141,7 +115,7 @@ export component MyTextBox {
                 input-type: root.password ? InputType.password : InputType.text;
                 enabled: root.enabled;
                 // 原版 SelectionBrush=ColorBrush3 + WPF 默认 SelectionOpacity 0.4
-                selection-background-color: GlobalTheme.color3.with-alpha(0.4);
+                selection-background-color: GlobalTheme.primary-text-color.with-alpha(0.4);
 
                 cursor-position-changed(pos) => {
                     // 光标越出可视区时手动横滚（WPF 由 ScrollViewer 自动完成）
@@ -167,7 +141,7 @@ export component MyTextBox {
             width: clip-rect.width;
             height: root.box-height;
             text: root.hint-text;
-            color: GlobalTheme.gray4;
+            color: GlobalTheme.secondary-text-color;
             font-size: root.font-size;
             font-family: GlobalTheme.font-family;
             vertical-alignment: center;

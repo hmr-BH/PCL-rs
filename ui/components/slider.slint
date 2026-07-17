@@ -1,31 +1,3 @@
-// ==========================================================================
-// PCL-rs 滑动条 MySlider — 1:1 移植
-// 原版文件：Controls/MySlider.xaml + MySlider.xaml.cs
-// 关键参数（原版）：
-//   高度固定 16px；底背景 ColorBrushSemiTransparent（无边框）
-//   底轨 LineBack：1px 色 ColorBrushBg0、不透明度 0.3、右边距 1
-//   进度 LineFore：2px、左边距 1、色跟随 BorderBrush
-//   滑块 ShapeDot：10×10 圆、描边 1.2（=BorderBrush）、填充同前景色
-//   颜色：悬停或拖动 ColorBrush3（40ms）、还原 ColorBrushBg0（100ms）、
-//     禁用 ColorBrushGray5（200ms）
-//   拖动：按下缩放→1.3（40ms EaseOutFluent），松开→1.0（200ms EaseOutFluent）
-//   值动画：time = (1-(1-Δp)³)×300ms（按键额外 +100ms），time>50 用
-//     EaseOutFluent 否则线性 —— Slint 侧统一用动态 duration + 默认缓动近似
-//   按键：悬停即聚焦（原版 MouseEnter→Focus()），←/→ 按 ValueByKey 步进，
-//     提示弹层 700ms 后自动隐藏
-//   提示弹层（getHintText 非空时）：下方 38px、跟随滑块、白底、
-//     边框 ColorBrush1 1.5px、圆角 3、投影 Opacity 0.4 Blur 4 Depth 2、
-//     文字 12px ColorBrush1、Margin 7,5、PopupAnimation=Fade
-// 已知偏差：
-//   1. 原版值域固定 0..MaxValue；本组件扩展 min-value（默认 0，行为一致）。
-//   2. 按下瞬间立即按指针位置跳值（原版要等首次 MouseMove，实际无差别）。
-//   3. 提示弹层横向位置 = 滑块中心并夹取在控件内（原版用 WPF Popup
-//      Placement=Center + HorizontalOffset 组合，效果近似）；长提示不换行
-//      （原版 MaxWidth 500 自动换行）。
-//   4. 窗口尺寸改变时进度可能带残余动画（原版 RefreshWidth 瞬时重置）。
-//   5. Change 回调的 user 标记：拖动/按键为 true（原版恒为 false，无实际消费方）。
-// ==========================================================================
-
 import { GlobalTheme } from "../theme/theme.slint";
 
 export component MySlider {

@@ -109,7 +109,6 @@ export component PclAnimItem {
     property <length> off: (root.horizontal ? (-25 + root.d1 + root.d2) : (-16 + root.d1 + root.d2 + root.d-exit)) * 1px;
     property <length> off-x: root.d-exit * 1px;
 
-    width: 100%;
     height: root.fixed-height > 0px ? root.fixed-height : self.preferred-height;
 
     container := Rectangle {
